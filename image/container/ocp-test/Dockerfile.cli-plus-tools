@@ -33,14 +33,13 @@ rm -rf /var/cache/dnf/*
     )"
     chmod a+x "${binDir}/virtctl"
 }
-# Install uv (Python package and tool runner).
-# Pre-installed so EnsureReqs uv in step scripts finds it immediately
-# without a runtime download, making step startup faster.
-# The install script sets executable permissions on uv and uvx itself.
+# Install uv.
 {
-    wget -qO - 'https://astral.sh/uv/install.sh' |
+    "${_fURL[@]}" - 'https://astral.sh/uv/install.sh' |
     UV_INSTALL_DIR="${binDir}" \
-    UV_NO_MODIFY_PATH=1 \
-    sh -s -- --quiet
+        NO_MODIFY_PATH=1 \
+        sh -s -- --quiet
 }
+
+true
 run-EOF
