@@ -11,7 +11,23 @@ else \
     microdnf install -y "${pkgs[@]}"
     microdnf clean all; \
 fi
+
+typeset binDir=/usr/local/bin toolName=
+typeset -a _fURL=()
+
+type -t wget 1>/dev/null && _fURL=(wget -qO) || _fURL=(curl -fsSLo)
+
+# Install `openssh-clients`, `jq`.
+typeset -a pkgs=(openssh-clients jq)
+if command -v dnf &> /dev/null; then
+    dnf install --setopt tsflags=nodocs -y "${pkgs[@]}"
+    dnf clean all
+else
+    microdnf install -y "${pkgs[@]}"
+    microdnf clean all
+fi
 rm -rf /var/cache/dnf/*
+
 # Install yq.
 {
     wget -qO "${binDir}/yq" \
