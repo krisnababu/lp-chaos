@@ -32,7 +32,30 @@ rm -rf /var/cache/dnf/*
             '.tag_name as $tag | .assets[] | select(.name=="virtctl-\($tag)-\($os)-\($cpu)").browser_download_url'
     )"
     chmod a+x "${binDir}/virtctl"
+# Install `yq`.
+toolName=yq && {
+    "${_fURL[@]}" "${binDir}/${toolName}" \
+        "https://github.com/jqlang/${toolName}/releases/latest/download/${toolName}-$(
+            uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/'
+        )-$(
+            uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'
+        )" &&
+    chmod a+x "${binDir}/${toolName}"
 }
+
+# Install `virtctl`.
+toolName=virtctl && {
+    "${_fURL[@]}" "${binDir}/${toolName}"  "$(
+        "${_fURL[@]}" - 'https://api.github.com/repos/kubevirt/kubevirt/releases/latest' |
+        jq -r \
+            --arg name "${toolName}" \
+            --arg os "$(uname -s | tr '[:upper:]' '[:lower:]')" \
+            --arg cpu "$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+            '.tag_name as $tag | .assets[] | select(.name == "\($name)-\($tag)-\($os)-\($cpu)").browser_download_url'
+    )" &&
+    chmod a+x "${binDir}/${toolName}"
+}
+
 # Install uv.
 {
     "${_fURL[@]}" - 'https://astral.sh/uv/install.sh' |
