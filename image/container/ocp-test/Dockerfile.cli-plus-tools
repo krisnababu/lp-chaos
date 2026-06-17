@@ -45,8 +45,8 @@ toolName=virtctl && {
 {
     "${_fURL[@]}" - 'https://astral.sh/uv/install.sh' |
     UV_INSTALL_DIR="${binDir}" \
-    NO_MODIFY_PATH=1 \
-    sh -s -- --quiet
+        NO_MODIFY_PATH=1 \
+        sh -s -- --quiet
 }
 
 true
