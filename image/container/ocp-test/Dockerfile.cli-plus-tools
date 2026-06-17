@@ -1,36 +1,53 @@
 FROM quay.io/openshift/ci:ocp_4.20_cli
 RUN <<run-EOF
 set -exo pipefail; shopt -s inherit_errexit
-typeset binDir=/usr/local/bin
-# Install openssh-clients, jq.
+typeset binDir=/usr/local/bin toolName=
+typeset -a _fURL=()
+
+type -t wget 1>/dev/null && _fURL=(wget -qO) || _fURL=(curl -fsSLo)
+
+# Install `openssh-clients`, `jq`.
 typeset -a pkgs=(openssh-clients jq)
-if command -v dnf &> /dev/null; then \
+if command -v dnf &> /dev/null; then
     dnf install --setopt tsflags=nodocs -y "${pkgs[@]}"
-    dnf clean all; \
-else \
+    dnf clean all
+else
     microdnf install -y "${pkgs[@]}"
-    microdnf clean all; \
+    microdnf clean all
 fi
 rm -rf /var/cache/dnf/*
-# Install yq.
-{
-    wget -qO "${binDir}/yq" \
-        "https://github.com/mikefarah/yq/releases/latest/download/yq_$(
+
+# Install `yq`.
+toolName=yq && {
+    "${_fURL[@]}" "${binDir}/${toolName}" \
+        "https://github.com/mikefarah/${toolName}/releases/latest/download/${toolName}_$(
             uname -s | tr '[:upper:]' '[:lower:]'
         )_$(
             uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'
         )" &&
-    chmod a+x "${binDir}/yq"
+    chmod a+x "${binDir}/${toolName}"
 }
-# Install virtctl.
-{
-    wget -qO "${binDir}/virtctl"  "$(
-        wget -qO - 'https://api.github.com/repos/kubevirt/kubevirt/releases/latest' |
+
+# Install `virtctl`.
+toolName=virtctl && {
+    "${_fURL[@]}" "${binDir}/${toolName}" "$(
+        "${_fURL[@]}" - 'https://api.github.com/repos/kubevirt/kubevirt/releases/latest' |
         jq -r \
+            --arg name "${toolName}" \
             --arg os "$(uname -s | tr '[:upper:]' '[:lower:]')" \
             --arg cpu "$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
-            '.tag_name as $tag | .assets[] | select(.name=="virtctl-\($tag)-\($os)-\($cpu)").browser_download_url'
-    )"
-    chmod a+x "${binDir}/virtctl"
+            '.tag_name as $tag | .assets[] | select(.name == "\($name)-\($tag)-\($os)-\($cpu)").browser_download_url'
+    )" &&
+    chmod a+x "${binDir}/${toolName}"
 }
+
+# Install uv.
+{
+    "${_fURL[@]}" - 'https://astral.sh/uv/install.sh' |
+    UV_INSTALL_DIR="${binDir}" \
+        NO_MODIFY_PATH=1 \
+        sh -s -- --quiet
+}
+
+true
 run-EOF
