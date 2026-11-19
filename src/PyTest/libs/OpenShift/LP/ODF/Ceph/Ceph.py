@@ -136,11 +136,15 @@ class Ceph:
             )
         logs.info('Disabled Ceph toolbox on `StorageCluster/%s`.', name)
 
-    def _ToolsPod(self) -> str:
+    def _ToolsPod(self, cmdTO: int = 60) -> str:
         '''
         Find a Ready toolbox Pod. A Pod on a `NotReady` Node is not Ready.
 
-        :return:    The Pod name, or an empty string if none is Ready.
+        :param cmdTO:   Timeout (in sec.) for the lookup (default: `60`).
+
+        :return:
+            The Pod name, or an empty string if none is Ready or the lookup
+            failed.
         '''
         result = self.oc.Run(
             'get',
@@ -148,6 +152,7 @@ class Ceph:
             n=self.namespace,
             l='app=rook-ceph-tools',
             o='json',
+            spPars={'timeout': cmdTO},
         )
         try:
             if not result.success: raise ValueError()
@@ -168,7 +173,9 @@ class Ceph:
         `oc exec <pod> -- ceph <args...> --format json`.
 
         :param args:    The `ceph` arguments (e.g. `'fs', 'dump'`).
-        :param cmdTO:   Timeout (in sec.) for the command (default: `60`).
+        :param cmdTO:
+            Timeout (in sec.) for each of the toolbox Pod lookup and the
+            command (default: `60`).
 
         :return:
             The parsed JSON output, or `None` if the command printed nothing.
@@ -183,7 +190,7 @@ class Ceph:
             isinstance(cmdTO, bool) or
             (cmdTO <= 0)
         ): raise ValueError('The `cmdTO` must be a positive integer.')
-        if not (toolsPod := self._ToolsPod()):
+        if not (toolsPod := self._ToolsPod(cmdTO)):
             raise RuntimeError('No Ready Ceph toolbox Pod found.')
         cephCmd = ' '.join(args)
         result = self.oc.Run(

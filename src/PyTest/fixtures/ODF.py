@@ -194,9 +194,9 @@ def FxtMDS(fxtODF: FxtObjODF) -> Generator[FxtObjMDS, None, None]:
     error.
 
     Teardown runs only if the test stopped a kubelet (`cln.upAt` is set). It
-    waits for the kubelet timer and the Node to be `Ready`, deletes the
-    standby-replay daemon Pods, so that Rook recreates them, then waits for
-    Ceph `HEALTH_OK`.
+    waits for the kubelet timer and the Node to be `Ready`, deletes the Pods
+    of the original standby-replay daemon, whatever its current role, so that
+    Rook recreates them as fresh processes, then waits for Ceph `HEALTH_OK`.
 
     :yield:
         A `FxtObjMDS` where:
@@ -271,7 +271,7 @@ def FxtMDS(fxtODF: FxtObjODF) -> Generator[FxtObjMDS, None, None]:
                         f'Ceph is not `HEALTH_OK` after {healthTO} sec.'
                     )
                     break
-                time.sleep(30)
+                time.sleep(min(30, deadline - time.monotonic()))
         if clnFail:
             clnErr = 'MDS cleanup failed: ' + '; '.join(clnFail)
             if (primExc is None): raise RuntimeError(clnErr)
