@@ -77,7 +77,10 @@ class Node:
 
         The timer is armed before the kubelet stops, so it fires even though
         the Node is unreachable through `oc` meanwhile. The Node must be
-        `Ready` first, so that becoming `NotReady` proves this stop.
+        `Ready` first, so that becoming `NotReady` after a started stop
+        command is strong evidence of this stop. The `oc debug` session is
+        expected to fail by losing its connection once the kubelet stops; a
+        session that never started is reported as a failed stop.
 
         :param downMin:
             Minutes the kubelet stays stopped.
@@ -86,8 +89,8 @@ class Node:
             (default: `10m`).
 
         :return:
-            `True` if the Node was `Ready` and becomes `NotReady` within the
-            given time.
+            `True` if the Node was `Ready`, the `oc debug` session started,
+            and the Node becomes `NotReady` within the given time.
 
         :raises ValueError: The `downMin` is invalid.
         '''
@@ -104,9 +107,12 @@ class Node:
         if not (ready.success and (ready.stdout.strip() == 'True')):
             logs.warning('Node `%s` is not Ready before the stop.', self.name)
             return False
-        # The result is not checked: `oc debug` fails once the kubelet stops
-        # and drops the session. The `NotReady` wait below confirms the stop.
-        self.oc.Run(
+        # The `oc debug` session is expected to fail: it loses the
+        # connection once the kubelet stops. `oc` itself prints
+        # `Starting pod/` once its debug Pod is Running on the Node;
+        # without it, the stop command never reached the host, and any Node
+        # condition change is unrelated to this stop.
+        debug = self.oc.Run(
             'debug',
             f'Node/{self.name}',
             '--', 'chroot', '/host', 'sh', '-c',
@@ -116,6 +122,12 @@ class Node:
             ),
             spPars={'timeout': 90},
         )
+        debugOut = (debug.stdout or '') + (debug.stderr or '')
+        if ('Starting pod/' not in debugOut):
+            logs.warning(
+                'Could not start a debug Pod on Node `%s`.', self.name,
+            )
+            return False
         if not self.oc.Run(
             'wait',
             f'Node/{self.name}',

@@ -121,11 +121,14 @@ def test_StopKubelet_ArmsTimerThenWaitsForNotReadyWhenReady(
     debugSuccess: bool,
     waitSuccess: bool,
 ) -> None:
-    # The `oc debug` result is ignored either way: its stream is expected to
-    # break when the kubelet stops.
+    # The `oc debug` exit code is ignored: its stream is expected to break
+    # when the kubelet stops; its output must show the started debug Pod.
     workerNode.oc.Run.side_effect = [
         CommandResult(True, 'True\n'),
-        CommandResult(debugSuccess),
+        CommandResult(
+            debugSuccess, '',
+            'Starting pod/worker-a-debug-abc12 ... connection refused',
+        ),
         CommandResult(waitSuccess),
     ]
     caplog.set_level('INFO')
@@ -162,6 +165,27 @@ def test_StopKubelet_ArmsTimerThenWaitsForNotReadyWhenReady(
         ('Stopped kubelet on Node `worker-a` for 40 min.' in caplog.text) is
         waitSuccess
     )
+
+
+@pytest.mark.parametrize('debugResult', [
+    CommandResult(False),
+    CommandResult(False, '', 'Error from server: Timeout'),
+    CommandResult(True, 'Starting something else'),
+])
+def test_StopKubelet_FailsWhenDebugSessionNeverStarted(
+    workerNode: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+    debugResult: CmdRes,
+) -> None:
+    workerNode.oc.Run.side_effect = [
+        CommandResult(True, 'True\n'),
+        debugResult,
+    ]
+
+    assert (workerNode.node.StopKubelet(40) is False)
+    assert (len(workerNode.oc.Run.call_args_list) == 2)
+    assert ('Could not start a debug Pod on Node `worker-a`.' in caplog.text)
+    assert ('Stopped kubelet' not in caplog.text)
 
 
 @pytest.mark.parametrize(('success', 'stdout'), [
