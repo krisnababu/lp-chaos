@@ -4,6 +4,7 @@
   - Use Python 3.11 and authenticated `oc` access to a disposable Cluster Under Test (CUT).
   - Align CLI context and runner kubeconfig with the same CUT. `kCfg` defaults to `KUBECONFIG` or `~/.kube/config`; shared CLI factories use their configured
     CLI context.
+  - For the ODF fixtures, use a CUT with ODF Internal mode installed and cluster-admin access.
   - Read the `## Prerequisites` sections of all fixture guides (`docs/guide--*.md`):
       - [`guide--VM.md`](docs/guide--VM.md#prerequisites)
       - [`guide--Krkn.md`](docs/guide--Krkn.md#prerequisites)
@@ -52,8 +53,8 @@ def test_GuestCommand(fxtVM: FxtObjVM) -> None:
     assert result.success
 ```
 
-Configure image and credentials first. See [direct VMs and custom templates](docs/guide--VM.md), [benchmark-runner](docs/guide--BenchmarkRunner.md), and
-[Krkn Hub](docs/guide--Krkn.md).
+Configure image and credentials first. See [direct VMs and custom templates](docs/guide--VM.md), [benchmark-runner](docs/guide--BenchmarkRunner.md),
+[Krkn Hub](docs/guide--Krkn.md), and [ODF Ceph](docs/guide--odf.md).
 
 
 ## Best Practices
@@ -212,12 +213,17 @@ Markers in the `ts--example/`:
   - `krkn`: A [KrknHub `pod-scenario` example](test--suites/ts--example/test_Krkn.py) kills a Pod in a Deployment and asserts a new one is respawned
     automatically.
 
+Markers in the `ts--ODF/`:
+  - `odf`: [ODF regression tests](test--suites/ts--ODF/test_Regression.py) stop the kubelet on the standby-replay MDS Node, check the replacement MDS for a File
+    Descriptor leak and `EMFILE`, then check that a CephFS failover completes. A run takes about one hour.
+
 Inspect live-suite selection without executing fixture setup:
 ```bash
 python -m pytest -c pytest.ini test--suites/ --collect-only
 python -m pytest -c pytest.ini test--suites/ -m vm --collect-only
 python -m pytest -c pytest.ini test--suites/ -m vm__br --collect-only
 python -m pytest -c pytest.ini test--suites/ -m krkn --collect-only
+python -m pytest -c pytest.ini test--suites/ -m odf --collect-only
 ```
 
 Only remove `--collect-only` on an authorized, disposable CUT after reviewing the selected tests' creation, disruption, guest-access, and cleanup requirements.
@@ -232,6 +238,8 @@ Use these Fixtures to provision VMs, communicate with their guests, and inject c
 | `fxtVM`       | Create VMs from a supplied or bundled YAML/Jinja template, with guest communication support.  | Per module    |
 | `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
 | `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
+| `fxtODF`      | Provide the ODF Ceph cluster, with the Ceph toolbox enabled and Ceph health checked.          | Per test      |
+| `fxtMDS`      | Provide the active and standby-replay CephFS MDS daemons, with recovery after a kubelet stop. | Per test      |
 
 Both VM Fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
 fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
