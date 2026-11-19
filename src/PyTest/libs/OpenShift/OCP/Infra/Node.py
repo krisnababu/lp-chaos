@@ -104,6 +104,8 @@ class Node:
         if not (ready.success and (ready.stdout.strip() == 'True')):
             logs.warning('Node `%s` is not Ready before the stop.', self.name)
             return False
+        # The result is not checked: `oc debug` fails once the kubelet stops
+        # and drops the session. The `NotReady` wait below confirms the stop.
         self.oc.Run(
             'debug',
             f'Node/{self.name}',

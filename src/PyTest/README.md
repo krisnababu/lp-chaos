@@ -10,7 +10,7 @@ Use these fixtures to provision VMs, communicate with their guests, and inject c
 | `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
 | `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
 | `fxtODF`      | Provide the ODF Ceph cluster, with the Ceph toolbox enabled and Ceph health checked.          | Per test      |
-| `fxtMDS`      | Provide the active and standby-replay CephFS MDS daemons, with recovery after a kubelet stop. | Per test      |
+| `fxtMDS`      | Discover the active and standby-replay MDS daemons of one CephFS file system and their Nodes. | Per test      |
 
 Both VM fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
 fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
@@ -134,10 +134,7 @@ Markers in the `ts--example/`:
   - `vm__br`: [benchmark-runner examples](test--suites/ts--example/test_BenchmarkRunner.py) include two VM Ready checks and a skipped legacy guest
     SSH/file-transfer test.
   - `krkn`: [Krkn examples](test--suites/ts--example/test_Krkn.py) are skipped launcher-Pod/host-observation placeholders.
-
-Markers in the `ts--ODF/`:
-  - `odf`: [ODF regression tests](test--suites/ts--ODF/test_Regression.py) stop the kubelet on the standby-replay MDS Node, check the replacement MDS for a File
-    Descriptor leak and `EMFILE`, then check that a CephFS failover completes. A run takes about one hour.
+  - `odf`: [ODF examples](test--suites/ts--example/test_ODF.py) check Ceph `HEALTH_OK` and the discovered MDS roles, Pods, and Nodes, with read-only queries.
 
 Inspect live-suite selection without executing fixture setup:
 ```bash

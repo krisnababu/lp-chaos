@@ -3,7 +3,7 @@ from unittest import mock
 
 import pytest
 
-import libs.OpenShift.OCP.Node.Node as MUT
+import libs.OpenShift.OCP.Infra.Node as MUT
 from libs.OpenShift.OCP.CLI.OC import OCcli
 from libs.Utils.CmdExec import CmdRes
 

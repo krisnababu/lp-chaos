@@ -492,28 +492,128 @@ def test_Health_RaisesWithoutValidStatusOrChecks(
     ): cephCluster.ceph.Health()
 
 
-def test_MDSstates_MapsDaemonNamesToStates(
+FS_DUMP = {'filesystems': [
+    {'mdsmap': {'fs_name': 'fs1', 'info': {
+        'gid_1': {'name': 'fs1-a', 'state': 'up:active'},
+        'gid_2': {'name': 'fs1-b', 'state': 'up:standby-replay'},
+    }}},
+    {'mdsmap': {'fs_name': 'fs0', 'info': {}}},
+    {'mdsmap': {'fs_name': 'fs2', 'info': {
+        'gid_3': {'name': 'fs2-a', 'state': 'up:replay'},
+    }}},
+]}
+
+
+def CephFS(name: str, owners: list[tuple[str, str]] | None) -> dict:
+    meta: dict = {'name': name}
+    if (owners is not None):
+        meta['ownerReferences'] = [
+            {'kind': kind, 'name': owner} for (kind, owner) in owners
+        ]
+    return {'metadata': meta}
+
+
+def test_ODFfsName_ReturnsCephFilesystemOwnedByStorageCluster(
+    monkeypatch: pytest.MonkeyPatch,
+    cephCluster: SimpleNamespace,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
+    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', False)
+    cephCluster.oc.Run.return_value = CommandResult(True, json.dumps({
+        'items': [
+            CephFS('user-fs', None),
+            CephFS('other-fs', [('StorageCluster', 'other-sc')]),
+            CephFS('cfg-fs', [('ConfigMap', 'ocs-storagecluster')]),
+            CephFS('ocs-storagecluster-cephfilesystem', [
+                ('Other', 'x'), ('StorageCluster', 'ocs-storagecluster'),
+            ]),
+        ],
+    }))
+
+    assert (
+        cephCluster.ceph.ODFfsName() == 'ocs-storagecluster-cephfilesystem'
+    )
+    cephCluster.oc.Run.assert_called_once_with(
+        'get',
+        'CephFilesystem',
+        n='odf-ns',
+        o='json',
+    )
+
+
+@pytest.mark.parametrize(('result', 'owned'), [
+    (CommandResult(False, json.dumps({'items': []})), None),
+    (CommandResult(True, 'not JSON'), None),
+    (CommandResult(True, json.dumps({})), None),
+    (CommandResult(True, json.dumps({'items': [{}]})), None),
+    (CommandResult(True, json.dumps({'items': [
+        {'metadata': {'name': 'fs', 'ownerReferences': [None]}},
+    ]})), None),
+    (CommandResult(True, json.dumps({'items': []})), []),
+    (CommandResult(True, json.dumps({'items': [
+        CephFS('user-fs', None),
+    ]})), []),
+    (CommandResult(True, json.dumps({'items': [
+        CephFS('fs1', [('StorageCluster', 'ocs-storagecluster')]),
+        CephFS('fs2', [('StorageCluster', 'ocs-storagecluster')]),
+    ]})), ['fs1', 'fs2']),
+])
+def test_ODFfsName_RaisesWithoutExactlyOneOwnedCephFilesystem(
+    monkeypatch: pytest.MonkeyPatch,
+    cephCluster: SimpleNamespace,
+    result: CmdRes,
+    owned: list[str] | None,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
+    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', False)
+    cephCluster.oc.Run.return_value = result
+
+    with pytest.raises(RuntimeError) as raised: cephCluster.ceph.ODFfsName()
+    assert (str(raised.value) == (
+        'Expected one `CephFilesystem` owned by `StorageCluster` '
+        f'`ocs-storagecluster`, got: {owned}.'
+    ))
+
+
+def test__FSmaps_MapsFileSystemNamesToMDSmaps(
     monkeypatch: pytest.MonkeyPatch,
     cephCluster: SimpleNamespace,
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, 'Run')
-    MUT.Ceph.Run.return_value = {'filesystems': [
-        {'mdsmap': {'info': {
-            'gid_1': {'name': 'fs1-a', 'state': 'up:active'},
-            'gid_2': {'name': 'fs1-b', 'state': 'up:standby-replay'},
-        }}},
-        {'mdsmap': {'info': {}}},
-        {'mdsmap': {'info': {
-            'gid_3': {'name': 'fs2-a', 'state': 'up:replay'},
-        }}},
-    ]}
+    MUT.Ceph.Run.return_value = FS_DUMP
 
-    assert (cephCluster.ceph.MDSstates() == {
-        'fs1-a': 'up:active',
-        'fs1-b': 'up:standby-replay',
-        'fs2-a': 'up:replay',
-    })
+    assert (sorted(cephCluster.ceph._FSmaps()) == ['fs0', 'fs1', 'fs2'])
     MUT.Ceph.Run.assert_called_once_with(cephCluster.ceph, 'fs', 'dump')
+
+
+@pytest.mark.parametrize(('fsName', 'states'), [
+    ('fs1', {'fs1-a': 'up:active', 'fs1-b': 'up:standby-replay'}),
+    ('fs0', {}),
+    ('fs2', {'fs2-a': 'up:replay'}),
+])
+def test_MDSstates_MapsDaemonNamesToStatesOfOneFileSystem(
+    monkeypatch: pytest.MonkeyPatch,
+    cephCluster: SimpleNamespace,
+    fsName: str,
+    states: dict[str, str],
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.Ceph, 'Run')
+    MUT.Ceph.Run.return_value = FS_DUMP
+
+    assert (cephCluster.ceph.MDSstates(fsName) == states)
+    MUT.Ceph.Run.assert_called_once_with(cephCluster.ceph, 'fs', 'dump')
+
+
+def test_MDSstates_RaisesForUnknownFileSystem(
+    monkeypatch: pytest.MonkeyPatch,
+    cephCluster: SimpleNamespace,
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.Ceph, 'Run')
+    MUT.Ceph.Run.return_value = FS_DUMP
+
+    with pytest.raises(
+        RuntimeError, match='No CephFS file system `fs9`.',
+    ): cephCluster.ceph.MDSstates('fs9')
 
 
 @pytest.mark.parametrize('fsDump', [
@@ -521,10 +621,11 @@ def test_MDSstates_MapsDaemonNamesToStates(
     {},
     {'filesystems': [{}]},
     {'filesystems': [{'mdsmap': {}}]},
-    {'filesystems': [{'mdsmap': {'info': []}}]},
-    {'filesystems': [{'mdsmap': {'info': {'gid_1': {'name': 'x'}}}}]},
+    {'filesystems': [{'mdsmap': {'info': {}}}]},
+    {'filesystems': [{'mdsmap': {'fs_name': 'fs1'}}]},
+    {'filesystems': [{'mdsmap': {'fs_name': 'fs1', 'info': []}}]},
 ])
-def test_MDSstates_RaisesWithoutMDSmap(
+def test__FSmaps_RaisesWithoutMDSmap(
     monkeypatch: pytest.MonkeyPatch,
     cephCluster: SimpleNamespace,
     fsDump: object,
@@ -534,7 +635,27 @@ def test_MDSstates_RaisesWithoutMDSmap(
 
     with pytest.raises(
         RuntimeError, match='Ceph file system dump has no MDS map.',
-    ): cephCluster.ceph.MDSstates()
+    ): cephCluster.ceph._FSmaps()
+
+
+@pytest.mark.parametrize('info', [
+    {'gid_1': {'name': 'fs1-a'}},
+    {'gid_1': {'state': 'up:active'}},
+    {'gid_1': None},
+])
+def test_MDSstates_RaisesWithInvalidDaemonEntry(
+    monkeypatch: pytest.MonkeyPatch,
+    cephCluster: SimpleNamespace,
+    info: dict[str, object],
+) -> None:
+    Utils.AutoPatch(monkeypatch, MUT.Ceph, 'Run')
+    MUT.Ceph.Run.return_value = {'filesystems': [
+        {'mdsmap': {'fs_name': 'fs1', 'info': info}},
+    ]}
+
+    with pytest.raises(
+        RuntimeError, match='Ceph file system dump has no MDS map.',
+    ): cephCluster.ceph.MDSstates('fs1')
 
 
 def test_FailMDS_RunsCephMDSfail(

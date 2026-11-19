@@ -234,24 +234,88 @@ class Ceph:
                 'Ceph health has no valid status or checks.'
             ) from None
 
-    def MDSstates(self) -> dict[str, str]:
+    def _FSmaps(self) -> dict[str, dict[str, Any]]:
         '''
-        Query the MDS daemon states of all file systems: `ceph fs dump`.
+        Query the MDS maps of all CephFS file systems: `ceph fs dump`.
 
-        :return:
-            A `dict` of MDS daemon name to its state (e.g.
-            `{'<fs>-a': 'up:active', '<fs>-b': 'up:standby-replay'}`).
+        :return:                A `dict` of file system name to its MDS map.
 
         :raises RuntimeError:   The command failed or returned no MDS map.
         '''
         fsDump = self.Run('fs', 'dump')
         try:
-            return {
-                mds['name']: mds['state']
+            fsMaps = {
+                fs['mdsmap']['fs_name']: fs['mdsmap']
                 for fs in fsDump['filesystems']
-                for mds in fs['mdsmap']['info'].values()
             }
+            if not all(isinstance(m['info'], dict) for m in fsMaps.values()):
+                raise TypeError()
+            return fsMaps
         except (AttributeError, KeyError, TypeError):
+            raise RuntimeError(
+                'Ceph file system dump has no MDS map.'
+            ) from None
+
+    def ODFfsName(self) -> str:
+        '''
+        Find the CephFS file system created by ODF: the `CephFilesystem`
+        resource owned by the `StorageCluster` (Rook names the Ceph file
+        system after it).
+
+        :return:                The file system name.
+
+        :raises RuntimeError:
+            The lookup failed, or not exactly one `CephFilesystem` is owned by
+            the `StorageCluster`.
+        '''
+        (scName, _) = self._StorageCluster()
+        result = self.oc.Run(
+            'get',
+            'CephFilesystem',
+            n=self.namespace,
+            o='json',
+        )
+        try:
+            if not result.success: raise ValueError()
+            owned = [
+                cfs['metadata']['name']
+                for cfs in json.loads(result.stdout)['items']
+                if any(
+                    (ref.get('kind') == 'StorageCluster') and
+                    (ref.get('name') == scName)
+                    for ref in cfs['metadata'].get('ownerReferences', [])
+                )
+            ]
+        except (AttributeError, KeyError, TypeError, ValueError):
+            owned = None
+        if not (owned and (len(owned) == 1)):
+            raise RuntimeError(
+                'Expected one `CephFilesystem` owned by `StorageCluster` '
+                f'`{scName}`, got: {owned}.'
+            )
+        return owned[0]
+
+    def MDSstates(self, fsName: str) -> dict[str, str]:
+        '''
+        Query the MDS daemon states of one CephFS file system.
+
+        :param fsName:  The file system name.
+
+        :return:
+            A `dict` of MDS daemon name to its state (e.g.
+            `{'<fs>-a': 'up:active', '<fs>-b': 'up:standby-replay'}`).
+
+        :raises RuntimeError:
+            The command failed, returned no MDS map, or has no file system
+            `fsName`.
+        '''
+        if ((fsMap := self._FSmaps().get(fsName)) is None):
+            raise RuntimeError(f'No CephFS file system `{fsName}`.')
+        try:
+            return {
+                mds['name']: mds['state'] for mds in fsMap['info'].values()
+            }
+        except (KeyError, TypeError):
             raise RuntimeError(
                 'Ceph file system dump has no MDS map.'
             ) from None
