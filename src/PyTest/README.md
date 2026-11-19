@@ -9,6 +9,8 @@ Use these fixtures to provision VMs, communicate with their guests, and inject c
 | `fxtVM`       | Create VMs from a supplied or bundled YAML/Jinja template, with guest communication support.  | Per test      |
 | `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
 | `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
+| `fxtODF`      | Provide the ODF Ceph cluster, with the Ceph toolbox enabled and Ceph health checked.          | Per test      |
+| `fxtMDS`      | Provide the active and standby-replay CephFS MDS daemons, with recovery after a kubelet stop. | Per test      |
 
 Both VM fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
 fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest
@@ -24,6 +26,7 @@ is usage guidance, not a measured performance guarantee.
 - Supply usable guest images, compatible storage, and any image-source credentials; repository values are examples.
 - For guest communication, provide OpenSSH tools and a guest SSH service/user authorized for the selected key. The bundled Windows template requires its
   Cloudbase-Init guest setup. Custom images/templates need equivalent setup.
+- For the ODF fixtures, use a CUT with ODF Internal mode installed and cluster-admin access.
 - Install benchmark-runner in its configured vendor virtual environment, or Krkn and Krkn Hub at their configured paths, only when using those integrations.
   Krkn rendering also requires GNU `envsubst` and Bash.
 - Align CLI context and runner kubeconfig with the same CUT. `kCfg` defaults to `KUBECONFIG` or `~/.kube/config`; shared CLI factories use their configured CLI
@@ -57,8 +60,8 @@ def test_GuestCommand(fxtVM: FxtObjVM) -> None:
     assert result.success
 ```
 
-Configure image and credentials first. See [direct VMs and custom templates](docs/guide--vm.md), [benchmark-runner](docs/guide--benchmark-runner.md), and
-[Krkn Hub](docs/guide--krkn.md).
+Configure image and credentials first. See [direct VMs and custom templates](docs/guide--vm.md), [benchmark-runner](docs/guide--benchmark-runner.md),
+[Krkn Hub](docs/guide--krkn.md), and [ODF Ceph](docs/guide--odf.md).
 
 
 ## Best Practices
@@ -132,12 +135,17 @@ Markers in the `ts--example/`:
     SSH/file-transfer test.
   - `krkn`: [Krkn examples](test--suites/ts--example/test_Krkn.py) are skipped launcher-Pod/host-observation placeholders.
 
+Markers in the `ts--ODF/`:
+  - `odf`: [ODF regression tests](test--suites/ts--ODF/test_Regression.py) stop the kubelet on the standby-replay MDS Node, check the replacement MDS for a File
+    Descriptor leak and `EMFILE`, then check that a CephFS failover completes. A run takes about one hour.
+
 Inspect live-suite selection without executing fixture setup:
 ```bash
 python -m pytest -c pytest.ini test--suites/ --collect-only
 python -m pytest -c pytest.ini test--suites/ -m vm --collect-only
 python -m pytest -c pytest.ini test--suites/ -m vm__br --collect-only
 python -m pytest -c pytest.ini test--suites/ -m krkn --collect-only
+python -m pytest -c pytest.ini test--suites/ -m odf --collect-only
 ```
 
 Only remove `--collect-only` on an authorized, disposable CUT after reviewing the selected tests' creation, disruption, guest-access, and cleanup requirements.
