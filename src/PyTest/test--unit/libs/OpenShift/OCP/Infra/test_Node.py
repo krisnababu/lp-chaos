@@ -188,6 +188,36 @@ def test_StopKubelet_FailsWhenDebugSessionNeverStarted(
     assert ('Stopped kubelet' not in caplog.text)
 
 
+@pytest.mark.parametrize('exitStat', [-2, -3])
+@pytest.mark.parametrize('waitSuccess', [False, True])
+def test_StopKubelet_WaitsWhenDebugOutputIsUnavailable(
+    workerNode: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+    exitStat: int,
+    waitSuccess: bool,
+) -> None:
+    # A subprocess exception (e.g. the 90 sec. timeout) or exhausted tries
+    # discard the `oc debug` output: the session state is unknown, and the
+    # Node condition wait decides.
+    caplog.set_level('INFO')
+    workerNode.oc.Run.side_effect = [
+        CommandResult(True, 'True\n'),
+        CmdRes(
+            '', "Command '['oc']' timed out after 90 seconds",
+            exitStat, False,
+        ),
+        CommandResult(waitSuccess),
+    ]
+
+    assert (workerNode.node.StopKubelet(40) is waitSuccess)
+    assert (len(workerNode.oc.Run.call_args_list) == 3)
+    assert ('Could not start a debug Pod' not in caplog.text)
+    assert (
+        ('Stopped kubelet on Node `worker-a` for 40 min.' in caplog.text) is
+        waitSuccess
+    )
+
+
 @pytest.mark.parametrize(('success', 'stdout'), [
     (False, 'True'),
     (True, 'False'),

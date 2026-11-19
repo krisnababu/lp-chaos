@@ -80,7 +80,9 @@ class Node:
         `Ready` first, so that becoming `NotReady` after a started stop
         command is strong evidence of this stop. The `oc debug` session is
         expected to fail by losing its connection once the kubelet stops; a
-        session that never started is reported as a failed stop.
+        session that never started is reported as a failed stop, and a
+        command timeout leaves the session state unknown, decided by the
+        Node condition wait.
 
         :param downMin:
             Minutes the kubelet stays stopped.
@@ -111,7 +113,11 @@ class Node:
         # connection once the kubelet stops. `oc` itself prints
         # `Starting pod/` once its debug Pod is Running on the Node;
         # without it, the stop command never reached the host, and any Node
-        # condition change is unrelated to this stop.
+        # condition change is unrelated to this stop. That output is only
+        # trustworthy when the process exited (`exitStat >= 0`): on a
+        # subprocess exception, such as the 90 sec. timeout, `CmdExec.Run`
+        # discards the captured output, so the session state stays unknown
+        # and the condition wait below decides.
         debug = self.oc.Run(
             'debug',
             f'Node/{self.name}',
@@ -123,7 +129,7 @@ class Node:
             spPars={'timeout': 90},
         )
         debugOut = (debug.stdout or '') + (debug.stderr or '')
-        if ('Starting pod/' not in debugOut):
+        if (('Starting pod/' not in debugOut) and (debug.exitStat >= 0)):
             logs.warning(
                 'Could not start a debug Pod on Node `%s`.', self.name,
             )
