@@ -9,15 +9,14 @@ import dataclasses
 import logging
 import os
 import sys
-import time
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
 from libs.CustomTypes import NamedDict
 from libs.OpenShift.LP.ODF.Ceph.Ceph import Ceph
 from libs.OpenShift.LP.ODF.Ceph.MDS import MDS
-from libs.OpenShift.OCP.Node.Node import Node
+from libs.OpenShift.OCP.Infra.Node import Node
 
 
 logs = logging.getLogger()
@@ -36,12 +35,13 @@ _DEF__FXT_CFG = NamedDict(
             chkHealth=True,
             timeout=NamedDict(
                 toolsReady='10m',
-                # Recovery after a Node outage may include data backfill.
-                healthOK=1800,
             ),
         ),
     ),
     testPars=NamedDict(),
+)
+_DEF__FXT_MDS_CFG = NamedDict(
+    fsName='',
 )
 
 
@@ -74,7 +74,7 @@ def FxtODF(
         @pytest.mark.parametrize(
             'fxtODF,',
             [({
-                'testPars': NamedDict(downMin=40),
+                'testPars': NamedDict(pollInt=30),
             },)],
             indirect=True,
         )
@@ -97,9 +97,6 @@ def FxtODF(
                   - timeout:
                       - toolsReady:
                         Ceph toolbox availability timeout (default: `'10m'`).
-                      - healthOK:
-                        Ceph `HEALTH_OK` wait budget in sec. at `fxtMDS`
-                        teardown (default: `1800`).
           - testPars:
             Parameters to be passed to test (default: `NamedDict()`).
 
@@ -155,18 +152,6 @@ def FxtODF(
         logs.info('The `fxtODF` fixture teardown complete.')
 
 
-@dataclasses.dataclass
-class MDSclnInf:
-    '''
-    MDS cleanup information, set by the test.
-
-    :param upAt:
-        The `time.monotonic()` value when the stopped kubelet is started again
-        by its timer (default: `None`, the kubelet was not stopped).
-    '''
-    upAt: Optional[float] = None
-
-
 @dataclasses.dataclass(frozen=True)
 class FxtObjMDS:
     '''
@@ -175,48 +160,55 @@ class FxtObjMDS:
     Can be sub-classed to add fields. Sub-classes must also be decorated with
     `@dataclass(frozen=True)`.
     '''
+    fsName: str
     active: MDS
     standby: MDS
+    activeNode: Node
     stbyNode: Node
-    cln: MDSclnInf
 
 
 @pytest.fixture(name='fxtMDS', scope='function')
-def FxtMDS(fxtODF: FxtObjODF) -> Generator[FxtObjMDS, None, None]:
+def FxtMDS(request: Any, fxtODF: FxtObjODF) -> FxtObjMDS:
     '''
-    Provide the active and standby-replay MDS daemons of the CephFS to a test.
+    Provide the active and standby-replay MDS daemons of one CephFS file
+    system to a test.
 
-    Configure via `fxtODF` (see `FxtODF()` for details).
+    Configure via indirect parametrize with `dict`:
+        @pytest.mark.parametrize(
+            'fxtMDS,',
+            [({'fsName': 'ocs-storagecluster-cephfilesystem'},)],
+            indirect=True,
+        )
 
-    Setup requires exactly one `up:active` and one `up:standby-replay` MDS,
-    each with a `Running` Pod, and a positive integer
-    `fxtInf.cephCfg.timeout.healthOK`. A setup failure is reported as a test
-    error.
+        Fixture Configuration:
+          - fsName:
+            The CephFS file system name (default: `''`, the file system
+            created by ODF, i.e. the `CephFilesystem` owned by the
+            `StorageCluster`).
 
-    Teardown runs only if the test stopped a kubelet (`cln.upAt` is set). It
-    waits for the kubelet timer and the Node to be `Ready`, deletes the Pods
-    of the original standby-replay daemon, whatever its current role, so that
-    Rook recreates them as fresh processes, then waits for Ceph `HEALTH_OK`.
+    The Ceph cluster and its CLI come from `fxtODF` (see `FxtODF()`).
 
-    :yield:
+    Setup requires, in the file system, exactly one `up:active` and one
+    `up:standby-replay` MDS (the ODF default topology), each with a `Running`
+    Pod. A setup failure is reported as a test error.
+    The fixture changes nothing, so it has no teardown.
+
+    :return:
         A `FxtObjMDS` where:
+          - fsName:     The CephFS file system name.
           - active:     The `up:active` `MDS`.
           - standby:    The `up:standby-replay` `MDS`.
+          - activeNode: The `Node` running the active MDS Pod.
           - stbyNode:   The `Node` running the standby-replay MDS Pod.
-          - cln:        A `MDSclnInf`, to be set by the test.
 
-    :raises ValueError:     The `healthOK` timeout is invalid.
-    :raises RuntimeError:
-        A setup prerequisite is not met, or the teardown failed.
+    :raises RuntimeError:   A setup prerequisite is not met.
     '''
+    fxtCfg = _DEF__FXT_MDS_CFG | NamedDict(**getattr(request, 'param', {}))
     (ceph, oc) = (fxtODF.ceph, fxtODF.cli.oc)
-    healthTO = fxtODF.fxtInf.cephCfg.timeout.healthOK
-    if (
-        not isinstance(healthTO, int) or
-        isinstance(healthTO, bool) or
-        (healthTO <= 0)
-    ): raise ValueError('The `healthOK` must be a positive integer (sec.).')
-    states = ceph.MDSstates()
+    try: fsName = fxtCfg.fsName or ceph.ODFfsName()
+    except RuntimeError as error:
+        raise RuntimeError(f'Prerequisites not met: {error}') from None
+    states = ceph.MDSstates(fsName)
     roles = {
         role: [name for (name, state) in states.items() if (state == role)]
         for role in ('up:active', 'up:standby-replay')
@@ -224,56 +216,22 @@ def FxtMDS(fxtODF: FxtObjODF) -> Generator[FxtObjMDS, None, None]:
     if any((len(names) != 1) for names in roles.values()):
         raise RuntimeError(
             'Prerequisites not met: expected one active and one '
-            f'standby-replay MDS, got: {states}.'
+            f'standby-replay MDS in `{fsName}`, got: {states}.'
         )
     active = MDS(roles['up:active'][0], ceph)
     standby = MDS(roles['up:standby-replay'][0], ceph)
-    nodeNames = {}
+    nodes = {}
     for mds in (active, standby):
-        (pod, nodeNames[mds.name]) = mds.Pod()
+        (pod, nodeName) = mds.Pod()
         if not pod:
             raise RuntimeError(
                 f'Prerequisites not met: no Running Pod for MDS `{mds.name}`.'
             )
-    stbyNode = Node(nodeNames[standby.name], oc=oc)
-    cln = MDSclnInf()
-    try:
-        yield FxtObjMDS(
-            active=active, standby=standby, stbyNode=stbyNode, cln=cln,
-        )
-    finally:
-        primExc = sys.exc_info()[1]
-        clnFail = []
-        if (cln.upAt is not None):
-            if ((remTO := (cln.upAt - time.monotonic())) > 0):
-                logs.info(
-                    'Waiting %d sec. for kubelet on Node `%s`.',
-                    remTO, stbyNode.name,
-                )
-                time.sleep(remTO)
-            if not stbyNode.WaitReady():
-                clnFail.append(f'Node `{stbyNode.name}` is not Ready')
-            if not oc.Run(
-                'delete',
-                'Pod',
-                n=fxtODF.ns,
-                l=f'app=rook-ceph-mds,ceph_daemon_id={standby.name}',
-                ignore_not_found=True, timeout='5m', wait='true',
-            ).success:
-                clnFail.append(f'Could not delete MDS `{standby.name}` Pods')
-            deadline = time.monotonic() + healthTO
-            while True:
-                try: (status, _) = ceph.Health()
-                except RuntimeError: status = ''
-                if (status == 'HEALTH_OK'): break
-                if (time.monotonic() >= deadline):
-                    clnFail.append(
-                        f'Ceph is not `HEALTH_OK` after {healthTO} sec.'
-                    )
-                    break
-                time.sleep(min(30, deadline - time.monotonic()))
-        if clnFail:
-            clnErr = 'MDS cleanup failed: ' + '; '.join(clnFail)
-            if (primExc is None): raise RuntimeError(clnErr)
-            logs.error('%s; preserving primary exception.', clnErr)
-        logs.info('The `fxtMDS` fixture teardown complete.')
+        nodes[mds.name] = Node(nodeName, oc=oc)
+    return FxtObjMDS(
+        fsName=fsName,
+        active=active,
+        standby=standby,
+        activeNode=nodes[active.name],
+        stbyNode=nodes[standby.name],
+    )

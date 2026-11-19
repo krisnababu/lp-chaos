@@ -10,13 +10,15 @@ ODF. Ceph commands run inside the Ceph toolbox Pod via `oc exec`, not locally.
 from fixtures.ODF import FxtObjMDS, FxtObjODF
 
 
-def test_Failover(fxtODF: FxtObjODF, fxtMDS: FxtObjMDS) -> None:
-    fxtODF.ceph.FailMDS(fxtMDS.active.name)
+def test_MDSroles(fxtODF: FxtObjODF, fxtMDS: FxtObjMDS) -> None:
+    states = fxtODF.ceph.MDSstates(fxtMDS.fsName)
+    assert (states.get(fxtMDS.active.name) == 'up:active')
 ```
 
-`fxtMDS` depends on `fxtODF`, so request both and configure them through `fxtODF`. This is a usage example, not a portable acceptance test. See the complete
-[fixture configuration and parametrization](../fixtures/ODF.py#L64), the [`Ceph`](../libs/OpenShift/LP/ODF/Ceph/Ceph.py) and
-[`MDS`](../libs/OpenShift/LP/ODF/Ceph/MDS.py) wrappers, and the [`Node`](../libs/OpenShift/OCP/Node/Node.py) wrapper for kubelet and host access.
+`fxtMDS` uses `fxtODF`, which pytest sets up with it; request `fxtODF` too for its `ceph` or `cli`. This usage example only reads cluster
+state; the [ODF examples](../test--suites/ts--example/test_ODF.py) are the non-disruptive live checks. See the complete
+[fixture configuration and parametrization](../fixtures/ODF.py), the [`Ceph`](../libs/OpenShift/LP/ODF/Ceph/Ceph.py) and
+[`MDS`](../libs/OpenShift/LP/ODF/Ceph/MDS.py) wrappers, and the [`Node`](../libs/OpenShift/OCP/Infra/Node.py) wrapper for kubelet and host access.
 
 
 ## Configuration
@@ -25,10 +27,11 @@ def test_Failover(fxtODF: FxtObjODF, fxtMDS: FxtObjMDS) -> None:
 - Setup enables the Ceph toolbox (`StorageCluster` `.spec.enableCephTools`) if it is not already enabled, and waits up to
   `fxtInf.cephCfg.timeout.toolsReady` (default: `10m`) for it. If the toolbox does not become available, setup disables it again.
 - With `fxtInf.cephCfg.chkHealth` (default: `True`), setup requires Ceph `HEALTH_OK`. Muted Ceph health checks are ignored.
-- `fxtMDS` requires exactly one `up:active` and one `up:standby-replay` MDS, each with a `Running` Pod. It yields both as `MDS` wrappers, the standby-replay
-  Pod's Node as a `Node` wrapper, and a `cln` record for the test.
+- `fxtMDS` uses one CephFS file system: its `fsName` setting (indirect parametrization of `fxtMDS`), or else the one created by ODF (the `CephFilesystem`
+  owned by the `StorageCluster`, e.g. `ocs-storagecluster-cephfilesystem`). It requires exactly one `up:active` and one `up:standby-replay` MDS there (the
+  ODF default topology), each with a `Running` Pod. It returns both as `MDS` wrappers, and their Pods' Nodes as `Node` wrappers.
 - A setup failure, such as an unavailable toolbox, unhealthy Ceph, or missing MDS roles, is reported as a test error, not a test failure.
-- Configure via indirect parametrization of `fxtODF` with `ns`, `kCfg`, `cliCfg`, `testPars`, and nested `NamedDict` settings.
+- Configure `fxtODF` via indirect parametrization with `ns`, `kCfg`, `cliCfg`, `testPars`, and nested `NamedDict` settings.
 
 
 ## Node Access and Kubelet Stop
@@ -40,9 +43,8 @@ unreachable through `oc` meanwhile. The `oc debug` Pod used for the stop is remo
 
 ## Cleanup
 
-`fxtODF` teardown disables the Ceph toolbox only if its setup enabled it. `fxtMDS` teardown runs only if the test set `cln.upAt` (the `time.monotonic()` value
-when the kubelet timer fires): it waits for the timer and the Node to be `Ready`, deletes the standby-replay daemon Pods so that Rook recreates them, then waits
-up to `fxtInf.cephCfg.timeout.healthOK` (a positive integer in sec., default: `1800`; checked at setup) for Ceph `HEALTH_OK`. Set `cln.upAt` before stopping a
-kubelet, so that cleanup also runs if the stop fails part way. Neither fixture restores other cluster state changed by the test.
+`fxtODF` teardown disables the Ceph toolbox only if its setup enabled it. Check that afterwards, outside the test, e.g.
+`oc get StorageCluster -n openshift-storage -o jsonpath='{.items[0].spec.enableCephTools}'`: an assertion in the test body runs before teardown. `fxtMDS`
+changes nothing, so it has no teardown. Neither fixture restores cluster state changed by the test.
 
 Kubelet stops and MDS failovers disrupt the whole storage cluster. Use a disposable CUT only.

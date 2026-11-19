@@ -7,7 +7,7 @@ import pytest
 import libs.OpenShift.LP.ODF.Ceph.MDS as MUT
 from libs.OpenShift.LP.ODF.Ceph.Ceph import Ceph
 from libs.OpenShift.OCP.CLI.OC import OCcli
-from libs.OpenShift.OCP.Node.Node import Node
+from libs.OpenShift.OCP.Infra.Node import Node
 from libs.Utils.CmdExec import CmdRes
 
 

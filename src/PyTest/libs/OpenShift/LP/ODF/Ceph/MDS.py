@@ -5,7 +5,7 @@ import shlex
 from typing import Optional
 
 from libs.OpenShift.LP.ODF.Ceph.Ceph import Ceph
-from libs.OpenShift.OCP.Node.Node import Node
+from libs.OpenShift.OCP.Infra.Node import Node
 
 
 class MDS:
