@@ -303,22 +303,29 @@ def test_DisableTools_RaisesWhenPatchFails(
     ([PodItem('tools-1', ready=None), PodItem('tools-2')], 'tools-2'),
     ([PodItem('tools-1', ready='False')], ''),
 ])
+@pytest.mark.parametrize('cmdTO', [None, 30])
 def test__ToolsPod_ReturnsFirstReadyPod(
     cephCluster: SimpleNamespace,
     pods: list[dict],
     expected: str,
+    cmdTO: int | None,
 ) -> None:
     cephCluster.oc.Run.return_value = CommandResult(
         True, json.dumps({'items': pods}),
     )
+    result = (
+        cephCluster.ceph._ToolsPod() if (cmdTO is None)
+        else cephCluster.ceph._ToolsPod(cmdTO=cmdTO)
+    )
 
-    assert (cephCluster.ceph._ToolsPod() == expected)
+    assert (result == expected)
     cephCluster.oc.Run.assert_called_once_with(
         'get',
         'Pod',
         n='odf-ns',
         l='app=rook-ceph-tools',
         o='json',
+        spPars={'timeout': 60 if (cmdTO is None) else cmdTO},
     )
 
 
@@ -361,6 +368,9 @@ def test_Run_ExecsCephInToolsPodWithJSONOutput(
     )
 
     assert (result == expected)
+    MUT.Ceph._ToolsPod.assert_called_once_with(
+        cephCluster.ceph, 60 if (cmdTO is None) else cmdTO,
+    )
     cephCluster.oc.Run.assert_called_once_with(
         'exec',
         'tools-1',

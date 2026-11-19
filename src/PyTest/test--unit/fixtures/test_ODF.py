@@ -457,3 +457,24 @@ def test_FxtMDS_PreservesPrimaryExceptionOverCleanupFailures(
     testBoundaries.logs.info.assert_called_once_with(
         'The `fxtMDS` fixture teardown complete.',
     )
+
+
+def test_FxtMDS_LimitsHealthWaitToBudget(
+    testBoundaries: SimpleNamespace,
+) -> None:
+    fxtODF = MDSodfObject()
+    fxtODF.fxtInf.cephCfg.timeout.healthOK = 45
+    fxtODF.ceph.Health.return_value = ('HEALTH_WARN', {'X'})
+    generator = MUT.FxtMDS.__wrapped__(fxtODF)
+    context = next(generator)
+    context.stbyNode.WaitReady.return_value = True
+    context.cln.upAt = testBoundaries.clock.now
+
+    with pytest.raises(
+        RuntimeError, match='Ceph is not `HEALTH_OK` after 45 sec.',
+    ): next(generator)
+    assert ([
+        call.args[0]
+        for call in testBoundaries.timeModule.sleep.call_args_list
+    ] == [30, 15])
+    assert (fxtODF.ceph.Health.call_count == 3)

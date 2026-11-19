@@ -57,7 +57,11 @@ class MDS:
             return (pod['metadata']['name'], nodeName)
         return ('', '')
 
-    def FDstat(self, node: Node, cmdTO: int = 60) -> Optional[tuple[int, int]]:
+    def FDstat(
+        self,
+        node: Node,
+        cmdTO: int = 60,
+    ) -> Optional[tuple[int, int, int]]:
         '''
         Count the open File Descriptors (FDs) of this daemon's `ceph-mds`
         process, on its Node host via `Node.RunOnHost()`.
@@ -66,17 +70,19 @@ class MDS:
         :param cmdTO:   Timeout (in sec.) for the host command (default: `60`).
 
         :return:
-            A `tuple` of `(fdCount, fdLimit)`, or `None` if not exactly one
-            matching process was found or the host command failed.
+            A `tuple` of `(pid, fdCount, fdLimit)`, or `None` if not exactly
+            one matching process was found or the host command failed. The
+            host PID stays the same across in-process respawns, and changes
+            when the process is restarted.
         '''
         result = node.RunOnHost(
             (
                 'for p in $(pgrep -x ceph-mds); do '
                 'tr "\\0" "\\n" < "/proc/${p}/cmdline" | '
-                f'grep -qx -e {shlex.quote(f"--id={self.name}")} '
+                f'grep -Fqx -e {shlex.quote(f"--id={self.name}")} '
                 f'-e {shlex.quote(self.name)} '
                 '|| continue; '
-                'echo "$(ls "/proc/${p}/fd" | wc -l) '
+                'echo "${p} $(ls "/proc/${p}/fd" | wc -l) '
                 '$(awk \'/^Max open files/ {print $4}\' '
                 '"/proc/${p}/limits")"; '
                 'done'
@@ -88,9 +94,9 @@ class MDS:
         lines = [line for line in lines if line.strip()]
         try:
             if (len(lines) != 1): raise ValueError()
-            (fdCount, fdLimit) = (int(value) for value in lines[0].split())
+            (pid, fdCount, fdLimit) = (int(val) for val in lines[0].split())
         except ValueError: return None
-        return (fdCount, fdLimit)
+        return (pid, fdCount, fdLimit)
 
     def LogCount(self, pod: str, pattern: str, since: str = '60s') -> int:
         '''
@@ -115,6 +121,6 @@ class MDS:
         if not result.success: return -1
         regex = re.compile(pattern, re.IGNORECASE)
         return sum(
-            1 for line in (result.stdout or '').split('\n')
+            1 for line in (result.stdout or '').splitlines()
             if regex.search(line)
         )
