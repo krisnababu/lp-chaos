@@ -152,6 +152,7 @@ def test_StopKubelet_ArmsTimerThenWaitsForNotReadyWhenReady(
                 'systemd-run --on-active=40min '
                 'systemctl start kubelet && systemctl stop kubelet'
             ),
+            tryMax=1,
             spPars={'timeout': 90},
         ),
         mock.call(

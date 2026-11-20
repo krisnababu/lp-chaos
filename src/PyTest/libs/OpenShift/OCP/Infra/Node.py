@@ -117,7 +117,10 @@ class Node:
         # trustworthy when the process exited (`exitStat >= 0`): on a
         # subprocess exception, such as the 90 sec. timeout, `CmdExec.Run`
         # discards the captured output, so the session state stays unknown
-        # and the condition wait below decides.
+        # and the condition wait below decides. The stop command is not
+        # idempotent: it arms a host `systemd` timer and stops the kubelet,
+        # so a retry by the executor's default would arm a second timer;
+        # exactly one attempt is enforced with `tryMax=1`.
         debug = self.oc.Run(
             'debug',
             f'Node/{self.name}',
@@ -126,6 +129,7 @@ class Node:
                 f'systemd-run --on-active={downMin}min '
                 'systemctl start kubelet && systemctl stop kubelet'
             ),
+            tryMax=1,
             spPars={'timeout': 90},
         )
         debugOut = (debug.stdout or '') + (debug.stderr or '')
