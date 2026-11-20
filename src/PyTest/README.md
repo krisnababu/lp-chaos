@@ -9,8 +9,7 @@ Use these fixtures to provision VMs, communicate with their guests, and inject c
 | `fxtVM`       | Create VMs from a supplied or bundled YAML/Jinja template, with guest communication support.  | Per test      |
 | `fxtVMbyBR`   | Deploy VM workloads at scale through benchmark-runner's separate worker process.              | Per module    |
 | `fxtKrkn`     | Inject chaos into the CUT by running a Krkn Hub scenario.                                     | Per test      |
-| `fxtODF`      | Provide the ODF Ceph cluster, with the Ceph toolbox enabled and Ceph health checked.          | Per test      |
-| `fxtMDS`      | Discover the active and standby-replay MDS daemons of one CephFS file system and their Nodes. | Per test      |
+| `fxtODF`      | Provide the ODF Ceph cluster, with the Ceph toolbox enabled, Ceph health checked, and bound storage operations (`storage.ceph.Health()`, `storage.ceph.MDS.Discover()`). | Per test |
 
 Both VM fixtures return `vmList` and `vmCreate(...)` for additional batches. Setup waits for provisioning and, by default, VM startup/Ready; it is not a
 fire-and-forget background API. `vm.ssh` connects lazily when first used and supports guest commands, PowerShell, and file transfer. Ready does not prove guest

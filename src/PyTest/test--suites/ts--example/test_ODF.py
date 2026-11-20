@@ -5,7 +5,7 @@ import pytest
 
 
 if TYPE_CHECKING:
-    from fixtures.ODF import FxtObjMDS, FxtObjODF
+    from fixtures.ODF import FxtObjODF
 
 
 logs = logging.getLogger()
@@ -20,29 +20,26 @@ class TestODF():
     @pytest.mark.odf
     def test_CephHealth(self, fxtODF: 'FxtObjODF') -> None:
         '''Check Ceph `HEALTH_OK` via the fixture-enabled Ceph toolbox.'''
-        (status, checks) = fxtODF.ceph.Health()
+        (status, checks) = fxtODF.storage.ceph.Health()
         logs.info('Ceph health: `%s` %s.', status, sorted(checks))
         assert (status == 'HEALTH_OK'), f'`{status}` {sorted(checks)}'
 
     @pytest.mark.odf
-    def test_MDSdiscovery(
-        self,
-        fxtODF: 'FxtObjODF',
-        fxtMDS: 'FxtObjMDS',
-    ) -> None:
+    def test_MDSdiscovery(self, fxtODF: 'FxtObjODF') -> None:
         '''Check the discovered MDS daemon roles, Pods, and Nodes.'''
-        states = fxtODF.ceph.MDSstates(fxtMDS.fsName)
-        logs.info('File system `%s` MDS states: %s.', fxtMDS.fsName, states)
-        assert (states.get(fxtMDS.active.name) == 'up:active')
-        assert (states.get(fxtMDS.standby.name) == 'up:standby-replay')
-        for (role, mds, node) in (
-            ('active', fxtMDS.active, fxtMDS.activeNode),
-            ('standby-replay', fxtMDS.standby, fxtMDS.stbyNode),
+        mds = fxtODF.storage.ceph.MDS.Discover()
+        states = fxtODF.ceph.MDSstates(mds.fsName)
+        logs.info('File system `%s` MDS states: %s.', mds.fsName, states)
+        assert (states.get(mds.active.name) == 'up:active')
+        assert (states.get(mds.standby.name) == 'up:standby-replay')
+        for (role, daemon, node) in (
+            ('active', mds.active, mds.activeNode),
+            ('standby-replay', mds.standby, mds.stbyNode),
         ):
-            (pod, nodeName) = mds.Pod()
+            (pod, nodeName) = daemon.Pod()
             logs.info(
                 'The %s MDS `%s`: Pod `%s` on Node `%s`.',
-                role, mds.name, pod, nodeName,
+                role, daemon.name, pod, nodeName,
             )
-            assert pod, f'No Running Pod for MDS `{mds.name}`.'
+            assert pod, f'No Running Pod for MDS `{daemon.name}`.'
             assert (nodeName == node.name)
