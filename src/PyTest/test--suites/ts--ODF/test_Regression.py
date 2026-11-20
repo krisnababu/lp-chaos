@@ -11,7 +11,7 @@ from libs.OpenShift.OCP.Infra.Node import Node
 
 
 if TYPE_CHECKING:
-    from fixtures.ODF import FxtObjMDS, FxtObjODF
+    from fixtures.ODF import FxtObjODF, MDSdiscovery
 
 
 logs = logging.getLogger()
@@ -19,20 +19,20 @@ logs = logging.getLogger()
 
 def _ObserveReplacementMDS(
     fxtODF: 'FxtObjODF',
-    fxtMDS: 'FxtObjMDS',
+    mds: 'MDSdiscovery',
     upAt: float,
 ) -> list[str]:
     '''
     Observe the replacement standby-replay MDS while the kubelet is stopped.
 
     :param fxtODF:  The `fxtODF` fixture object.
-    :param fxtMDS:  The `fxtMDS` fixture object.
+    :param mds:     The `Discover()` result of the test.
     :param upAt:    The `time.monotonic()` value when the kubelet is back.
 
     :return:        The FD leak and `EMFILE` findings.
     '''
     (oc, pars) = (fxtODF.cli.oc, fxtODF.testPars)
-    (standby, stbyNode) = (fxtMDS.standby, fxtMDS.stbyNode)
+    (standby, stbyNode) = (mds.standby, mds.stbyNode)
     findings = []
 
     # Observe the replacement MDS until the FD limit is hit and `EMFILE`
@@ -112,7 +112,7 @@ def _ObserveReplacementMDS(
 
 def _FailoverAfterKubelet(
     fxtODF: 'FxtObjODF',
-    fxtMDS: 'FxtObjMDS',
+    mds: 'MDSdiscovery',
     upAt: float,
 ) -> list[str]:
     '''
@@ -120,13 +120,13 @@ def _FailoverAfterKubelet(
     check that the standby-replay MDS takes over.
 
     :param fxtODF:  The `fxtODF` fixture object.
-    :param fxtMDS:  The `fxtMDS` fixture object.
+    :param mds:     The `Discover()` result of the test.
     :param upAt:    The `time.monotonic()` value when the kubelet is back.
 
     :return:        The Node, MDS role and failover findings.
     '''
     (ceph, pars) = (fxtODF.ceph, fxtODF.testPars)
-    (standby, stbyNode) = (fxtMDS.standby, fxtMDS.stbyNode)
+    (standby, stbyNode) = (mds.standby, mds.stbyNode)
     findings = []
 
     # Wait for the kubelet timer and the Node, then for the MDS roles: one
@@ -143,7 +143,7 @@ def _FailoverAfterKubelet(
         time.sleep(pars.settleSec)
         deadline = time.monotonic() + pars.rolesTO
         while True:
-            try: states = ceph.MDSstates(fxtMDS.fsName)
+            try: states = ceph.MDSstates(mds.fsName)
             except RuntimeError as error:
                 logs.warning('Could not query Ceph: %s', error)
                 states = {}
@@ -177,7 +177,7 @@ def _FailoverAfterKubelet(
             time.sleep(pars.pollInt)
             try:
                 (_, checks) = ceph.Health()
-                state = ceph.MDSstates(fxtMDS.fsName).get(
+                state = ceph.MDSstates(mds.fsName).get(
                     standby.name, '',
                 )
             except RuntimeError as error:
@@ -199,7 +199,7 @@ def _FailoverAfterKubelet(
 
 def _RecoverKubeletStop(
     fxtODF: 'FxtObjODF',
-    fxtMDS: 'FxtObjMDS',
+    mds: 'MDSdiscovery',
     upAt: float,
 ) -> list[str]:
     '''
@@ -209,13 +209,13 @@ def _RecoverKubeletStop(
     processes, then wait up to `testPars.healthTO` sec. for Ceph `HEALTH_OK`.
 
     :param fxtODF:  The `fxtODF` fixture object.
-    :param fxtMDS:  The `fxtMDS` fixture object.
+    :param mds:     The `Discover()` result of the test.
     :param upAt:    The `time.monotonic()` value when the kubelet is back.
 
     :return:        The recovery failures.
     '''
     (ceph, oc) = (fxtODF.ceph, fxtODF.cli.oc)
-    (standby, stbyNode) = (fxtMDS.standby, fxtMDS.stbyNode)
+    (standby, stbyNode) = (mds.standby, mds.stbyNode)
     healthTO = fxtODF.testPars.healthTO
     clnFail = []
     logs.info('Recovering from the kubelet stop on Node `%s`.', stbyNode.name)
@@ -280,7 +280,6 @@ class TestMDS():
     def test_StandbyReplayFDleakAfterKubeletStop(
         self,
         fxtODF: 'FxtObjODF',
-        fxtMDS: 'FxtObjMDS',
     ) -> None:
         '''
         Stop the kubelet on the standby-replay MDS Node. Rook starts a
@@ -290,13 +289,15 @@ class TestMDS():
         the active MDS and check that the standby-replay MDS takes over.
         Recover from the kubelet stop in any case.
         '''
-        (pars, stbyNode) = (fxtODF.testPars, fxtMDS.stbyNode)
-        standby = fxtMDS.standby
+        (pars, mds) = (
+            fxtODF.testPars, fxtODF.storage.ceph.MDS.Discover(),
+        )
+        (standby, stbyNode) = (mds.standby, mds.stbyNode)
 
         # Re-check the roles and placement right before the stop: the
-        # `fxtMDS` values are a setup-time snapshot, and stopping the kubelet
-        # of the active MDS Node would test the wrong scenario.
-        states = fxtODF.ceph.MDSstates(fxtMDS.fsName)
+        # `Discover()` values are a discovery-time snapshot, and stopping the
+        # kubelet of the active MDS Node would test the wrong scenario.
+        states = fxtODF.ceph.MDSstates(mds.fsName)
         (_, nodeName) = standby.Pod()
         assert (
             (states.get(standby.name) == 'up:standby-replay') and
@@ -317,12 +318,12 @@ class TestMDS():
             assert stbyNode.StopKubelet(pars.downMin), (
                 f'Could not stop the kubelet on Node `{stbyNode.name}`.'
             )
-            findings = _ObserveReplacementMDS(fxtODF, fxtMDS, upAt)
-            findings += _FailoverAfterKubelet(fxtODF, fxtMDS, upAt)
+            findings = _ObserveReplacementMDS(fxtODF, mds, upAt)
+            findings += _FailoverAfterKubelet(fxtODF, mds, upAt)
         finally:
             # Report recovery failures with the findings, or log them if the
             # test already failed, so that they never hide the test result.
-            if (clnFail := _RecoverKubeletStop(fxtODF, fxtMDS, upAt)):
+            if (clnFail := _RecoverKubeletStop(fxtODF, mds, upAt)):
                 clnErr = 'Kubelet stop recovery failed: ' + '; '.join(clnFail)
                 if (sys.exc_info()[1] is None): findings.append(clnErr)
                 else: logs.error('%s; preserving primary exception.', clnErr)
