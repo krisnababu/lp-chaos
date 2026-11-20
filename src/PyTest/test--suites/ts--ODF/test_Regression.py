@@ -79,6 +79,10 @@ def _ObserveReplacementMDS(
             varPct = ''
         if (varPct.isdigit() and (int(varPct) > pars.varMaxPct)):
             logs.warning('Node `%s` `/var` is almost full.', nodeName)
+            findings.append(
+                f'Observation incomplete: Node `{nodeName}` `/var` usage '
+                f'{varPct}% is above {pars.varMaxPct}%'
+            )
             break
         if ((fdStat is not None) and fdLim and (fdCount >= fdLim)):
             if ((limAt is None) or (limAt[0] != pid)):
