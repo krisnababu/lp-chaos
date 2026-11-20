@@ -28,7 +28,9 @@ def CommandResult(success: bool, stdout: str = '', stderr: str = '') -> CmdRes:
 
 
 def StgClusterResult(spec: dict | None = None) -> CmdRes:
-    stgCluster = {'metadata': {'name': 'ocs-storagecluster'}}
+    stgCluster = {
+        'metadata': {'name': 'ocs-storagecluster', 'uid': 'sc-uid-1'},
+    }
     if (spec is not None): stgCluster['spec'] = spec
     return CommandResult(True, json.dumps({'items': [stgCluster]}))
 
@@ -80,7 +82,8 @@ def test__StorageCluster_ReturnsNameAndToolsState(
     cephCluster.oc.Run.return_value = StgClusterResult(spec)
 
     assert (
-        cephCluster.ceph._StorageCluster() == ('ocs-storagecluster', expected)
+        cephCluster.ceph._StorageCluster() ==
+        ('ocs-storagecluster', 'sc-uid-1', expected)
     )
     cephCluster.oc.Run.assert_called_once_with(
         'get',
@@ -118,7 +121,9 @@ def test_EnableTools_PatchesThenWaitsWhenDisabled(
     timeout: str | None,
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', False)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', False,
+    )
     cephCluster.oc.Run.return_value = CommandResult(True)
     caplog.set_level('INFO')
     result = (
@@ -160,7 +165,9 @@ def test_EnableTools_OnlyWaitsWhenEnabled(
     cephCluster: SimpleNamespace,
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', True)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', True,
+    )
     cephCluster.oc.Run.return_value = CommandResult(True)
 
     assert (cephCluster.ceph.EnableTools() is False)
@@ -174,7 +181,9 @@ def test_EnableTools_RaisesWhenPatchFails(
     cephCluster: SimpleNamespace,
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', False)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', False,
+    )
     cephCluster.oc.Run.return_value = CommandResult(False)
 
     with pytest.raises(
@@ -199,7 +208,9 @@ def test_EnableTools_RaisesWithoutDisablingPreEnabledToolbox(
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
     Utils.AutoPatch(monkeypatch, MUT.Ceph, 'DisableTools')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', True)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', True,
+    )
     cephCluster.oc.Run.side_effect = [
         CommandResult(success) for success in waitResults
     ]
@@ -226,7 +237,9 @@ def test_EnableTools_DisablesOwnToolboxBeforeRaising(
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
     Utils.AutoPatch(monkeypatch, MUT.Ceph, 'DisableTools')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', False)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', False,
+    )
     disableError = RuntimeError('patch failed')
     if disableFails: MUT.Ceph.DisableTools.side_effect = disableError
     cephCluster.oc.Run.side_effect = [CommandResult(True)] + [
@@ -260,7 +273,9 @@ def test_DisableTools_PatchesWhenEnabledByCaller(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', True)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', True,
+    )
     cephCluster.oc.Run.return_value = CommandResult(True)
     caplog.set_level('INFO')
     cephCluster.ceph.DisableTools(True)
@@ -283,7 +298,9 @@ def test_DisableTools_RaisesWhenPatchFails(
     cephCluster: SimpleNamespace,
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', True)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', True,
+    )
     cephCluster.oc.Run.return_value = CommandResult(False)
 
     with pytest.raises(
@@ -508,7 +525,8 @@ def CephFS(name: str, owners: list[tuple[str, str]] | None) -> dict:
     meta: dict = {'name': name}
     if (owners is not None):
         meta['ownerReferences'] = [
-            {'kind': kind, 'name': owner} for (kind, owner) in owners
+            {'kind': kind, 'name': owner, 'uid': 'sc-uid-1'}
+            for (kind, owner) in owners
         ]
     return {'metadata': meta}
 
@@ -518,12 +536,20 @@ def test_ODFfsName_ReturnsCephFilesystemOwnedByStorageCluster(
     cephCluster: SimpleNamespace,
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', False)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', False,
+    )
     cephCluster.oc.Run.return_value = CommandResult(True, json.dumps({
         'items': [
             CephFS('user-fs', None),
             CephFS('other-fs', [('StorageCluster', 'other-sc')]),
             CephFS('cfg-fs', [('ConfigMap', 'ocs-storagecluster')]),
+            {'metadata': {'name': 'stale-fs', 'ownerReferences': [
+                {
+                    'kind': 'StorageCluster', 'name': 'ocs-storagecluster',
+                    'uid': 'recreated-sc-old-uid',
+                },
+            ]}},
             CephFS('ocs-storagecluster-cephfilesystem', [
                 ('Other', 'x'), ('StorageCluster', 'ocs-storagecluster'),
             ]),
@@ -565,7 +591,9 @@ def test_ODFfsName_RaisesWithoutExactlyOneOwnedCephFilesystem(
     owned: list[str] | None,
 ) -> None:
     Utils.AutoPatch(monkeypatch, MUT.Ceph, '_StorageCluster')
-    MUT.Ceph._StorageCluster.return_value = ('ocs-storagecluster', False)
+    MUT.Ceph._StorageCluster.return_value = (
+        'ocs-storagecluster', 'sc-uid-1', False,
+    )
     cephCluster.oc.Run.return_value = result
 
     with pytest.raises(RuntimeError) as raised: cephCluster.ceph.ODFfsName()
@@ -670,4 +698,4 @@ def test_FailMDS_RunsCephMDSfail(
     MUT.Ceph.Run.assert_called_once_with(
         cephCluster.ceph, 'mds', 'fail', 'fs1-a',
     )
-    assert ('Marked MDS daemon `fs1-a` as failed.' in caplog.text)
+    assert ('Sent MDS fail for daemon `fs1-a`.' in caplog.text)

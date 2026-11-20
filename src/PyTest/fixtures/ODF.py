@@ -151,10 +151,7 @@ def FxtODF(
                     f'Ceph is not `HEALTH_OK`: `{status}` {sorted(checks)}.'
                 )
         # The `storage` namespace exposes the storage operations bound to
-        # this fixture's Ceph context. Future extension model, names below
-        # are extension points only, not implemented here: `ceph` may gain
-        # MCG siblings with provider-specific backing-store adapters, e.g.
-        # `mcgAWSs3`, `mcgAzureBlob` (Azure Blob object storage) and `mcgGCS`.
+        # this fixture's Ceph context.
         yield FxtObjODF(
             ceph=ceph,
             storage=NamedDict(
@@ -232,7 +229,8 @@ def DiscoverMDS(
     :raises RuntimeError:   A discovery prerequisite is not met: the file
         system does not have exactly one `up:active` and one
         `up:standby-replay` MDS (the ODF default topology), each with a
-        `Running` Pod, or ODF owns no `CephFilesystem`.
+        `Running` Pod, or ODF owns no `CephFilesystem`, or the MDS roles
+        changed during the discovery.
     '''
     try: fsName = fsName or ceph.ODFfsName()
     except RuntimeError as error:
@@ -257,6 +255,13 @@ def DiscoverMDS(
                 f'Prerequisites not met: no Running Pod for MDS `{mds.name}`.'
             )
         nodes[mds.name] = Node(nodeName, oc=oc)
+    # The Pod lookups above take time; re-validate the map so the snapshot
+    # never pairs a pre-failover role with a post-failover Pod placement.
+    if (ceph.MDSstates(fsName) != states):
+        raise RuntimeError(
+            f'Prerequisites not met: MDS roles of `{fsName}` changed during '
+            'discovery; discover again.'
+        )
     return MDSdiscovery(
         fsName=fsName,
         active=active,

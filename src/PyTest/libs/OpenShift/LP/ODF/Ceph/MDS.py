@@ -71,20 +71,28 @@ class MDS:
 
         :return:
             A `tuple` of `(pid, fdCount, fdLimit)`, or `None` if not exactly
-            one matching process was found or the host command failed. The
+            one matching process was found or the host command failed. A
+            process whose `/proc` FD listing fails, or whose cmdline no
+            longer matches after the sample, is skipped: its PID ended or
+            was reused, so the sample would not be this daemon's. The
             host PID stays the same across in-process respawns, and changes
             when the process is restarted.
         '''
+        matchCmd = (
+            f'grep -Fqx -e {shlex.quote(f"--id={self.name}")} '
+            f'-e {shlex.quote(self.name)}'
+        )
         result = node.RunOnHost(
             (
                 'for p in $(pgrep -x ceph-mds); do '
-                'tr "\\0" "\\n" < "/proc/${p}/cmdline" | '
-                f'grep -Fqx -e {shlex.quote(f"--id={self.name}")} '
-                f'-e {shlex.quote(self.name)} '
+                f'tr "\\0" "\\n" < "/proc/${{p}}/cmdline" | {matchCmd} '
                 '|| continue; '
-                'echo "${p} $(ls "/proc/${p}/fd" | wc -l) '
-                '$(awk \'/^Max open files/ {print $4}\' '
-                '"/proc/${p}/limits")"; '
+                'fds=$(ls "/proc/${p}/fd") || continue; '
+                'lim=$(awk \'/^Max open files/ {print $4}\' '
+                '"/proc/${p}/limits"); '
+                f'tr "\\0" "\\n" < "/proc/${{p}}/cmdline" | {matchCmd} '
+                '|| continue; '
+                'echo "${p} $(echo ${fds} | wc -w) ${lim}"; '
                 'done'
             ),
             cmdTO=cmdTO,

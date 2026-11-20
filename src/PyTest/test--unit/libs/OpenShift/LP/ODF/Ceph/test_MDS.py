@@ -128,8 +128,12 @@ def test_FDstat_ProbesMatchingProcessOnHost(
         'for p in $(pgrep -x ceph-mds); do '
         'tr "\\0" "\\n" < "/proc/${p}/cmdline" | '
         'grep -Fqx -e --id=fs1-b -e fs1-b || continue; '
-        'echo "${p} $(ls "/proc/${p}/fd" | wc -l) '
-        '$(awk \'/^Max open files/ {print $4}\' "/proc/${p}/limits")"; '
+        'fds=$(ls "/proc/${p}/fd") || continue; '
+        'lim=$(awk \'/^Max open files/ {print $4}\' '
+        '"/proc/${p}/limits"); '
+        'tr "\\0" "\\n" < "/proc/${p}/cmdline" | '
+        'grep -Fqx -e --id=fs1-b -e fs1-b || continue; '
+        'echo "${p} $(echo ${fds} | wc -w) ${lim}"; '
         'done',
         cmdTO=60 if (cmdTO is None) else cmdTO,
     )
