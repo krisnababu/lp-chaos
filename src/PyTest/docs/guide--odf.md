@@ -35,8 +35,8 @@ state; the [ODF examples](../test--suites/ts--example/test_ODF.py) are the non-d
   wrappers.
 - MDS discovery is lazy: requesting `fxtODF` or querying Ceph health does not require the MDS topology; it is checked only when
   `Discover()` is called. Each call queries the current roles, so the result is a snapshot of that moment, e.g. re-discover after a failover.
-- A setup or discovery failure, such as an unavailable toolbox, unhealthy Ceph, or missing MDS roles, is reported as a test error, not a test
-  failure.
+- A setup failure, such as an unavailable toolbox or unhealthy Ceph, is reported as a test error. A discovery failure, such as missing MDS roles,
+  raises `RuntimeError` from `Discover()` in the test body and is reported as a test failure.
 - Configure `fxtODF` via indirect parametrization with `ns`, `kCfg`, `cliCfg`, `testPars`, and nested `NamedDict` settings.
 
 
