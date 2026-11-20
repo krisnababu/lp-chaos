@@ -318,7 +318,8 @@ def test_DiscoverMDS_ReturnsFrozenRolesOfTheODFfileSystem(
         mock.call('worker-b', oc=oc),
     ])
     ceph.ODFfsName.assert_called_once_with()
-    ceph.MDSstates.assert_called_once_with('fs')
+    assert (ceph.MDSstates.call_count == 2)
+    ceph.MDSstates.assert_called_with('fs')
     testBoundaries.namedDict.assert_not_called()
     original = getattr(context, field)
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -339,7 +340,8 @@ def test_DiscoverMDS_UsesConfiguredFileSystem(
     context = MUT.DiscoverMDS(fsName='fs2', ceph=ceph, oc=oc)
     assert (context.fsName == 'fs2')
     ceph.ODFfsName.assert_not_called()
-    ceph.MDSstates.assert_called_once_with('fs2')
+    assert (ceph.MDSstates.call_count == 2)
+    ceph.MDSstates.assert_called_with('fs2')
 
 
 def test_DiscoverMDS_RequeriesCurrentRolesOnEveryCall(
@@ -348,6 +350,8 @@ def test_DiscoverMDS_RequeriesCurrentRolesOnEveryCall(
     (ceph, oc) = MDScontext()
     ceph.MDSstates.side_effect = [
         {'fs-a': 'up:active', 'fs-b': 'up:standby-replay'},
+        {'fs-a': 'up:active', 'fs-b': 'up:standby-replay'},
+        {'fs-b': 'up:active', 'fs-a': 'up:standby-replay'},
         {'fs-b': 'up:active', 'fs-a': 'up:standby-replay'},
     ]
     MDSpods(testBoundaries, {
@@ -363,6 +367,29 @@ def test_DiscoverMDS_RequeriesCurrentRolesOnEveryCall(
     assert (second.active.name == 'fs-b')
     assert (second.standby.name == 'fs-a')
     assert (ceph.ODFfsName.call_count == 2)
+    assert (ceph.MDSstates.call_count == 4)
+
+
+def test_DiscoverMDS_RaisesWhenRolesChangeDuringDiscovery(
+    testBoundaries: SimpleNamespace,
+) -> None:
+    (ceph, oc) = MDScontext()
+    ceph.MDSstates.side_effect = [
+        {'fs-a': 'up:active', 'fs-b': 'up:standby-replay'},
+        {'fs-b': 'up:active', 'fs-a': 'up:standby-replay'},
+    ]
+    MDSpods(testBoundaries, {
+        'fs-a': ('mds-a-pod', 'worker-a'),
+        'fs-b': ('mds-b-pod', 'worker-b'),
+    })
+    testBoundaries.nodeFactory.side_effect = lambda name, oc: mock.Mock()
+
+    with pytest.raises(RuntimeError) as raised:
+        MUT.DiscoverMDS(ceph=ceph, oc=oc)
+    assert (str(raised.value) == (
+        'Prerequisites not met: MDS roles of `fs` changed during '
+        'discovery; discover again.'
+    ))
     assert (ceph.MDSstates.call_count == 2)
 
 

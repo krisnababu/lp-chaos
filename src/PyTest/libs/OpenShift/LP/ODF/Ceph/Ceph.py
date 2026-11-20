@@ -34,13 +34,14 @@ class Ceph:
         self.namespace = ns
         self.oc = oc or OCcli(n=ns)
 
-    def _StorageCluster(self) -> tuple[str, bool]:
+    def _StorageCluster(self) -> tuple[str, str, bool]:
         '''
         Query the `StorageCluster` via `oc get`.
 
         :return:
             A `tuple` where:
               - name:       The `StorageCluster` name.
+              - uid:        The `StorageCluster` UID.
               - toolsOn:    The `.spec.enableCephTools` value.
 
         :raises RuntimeError:
@@ -56,12 +57,13 @@ class Ceph:
             if not result.success: raise ValueError()
             stgCluster = json.loads(result.stdout)['items'][0]
             name = stgCluster['metadata']['name']
+            uid = stgCluster['metadata'].get('uid', '')
         except (IndexError, KeyError, TypeError, ValueError):
             raise RuntimeError(
                 f'No `StorageCluster` found in Namespace `{self.namespace}`.'
             ) from None
         toolsOn = stgCluster.get('spec', {}).get('enableCephTools')
-        return (name, toolsOn is True)
+        return (name, uid, toolsOn is True)
 
     def EnableTools(self, timeout: str = '10m') -> bool:
         '''
@@ -81,7 +83,7 @@ class Ceph:
             available within the given time. In the latter case, a toolbox
             enabled by this call is disabled again (best effort).
         '''
-        (name, toolsOn) = self._StorageCluster()
+        (name, _, toolsOn) = self._StorageCluster()
         if not toolsOn:
             if not self.oc.Run(
                 'patch',
@@ -123,7 +125,7 @@ class Ceph:
             The `StorageCluster` lookup or patch failed.
         '''
         if not enabled: return
-        (name, _) = self._StorageCluster()
+        (name, _, _) = self._StorageCluster()
         if not self.oc.Run(
             'patch',
             f'StorageCluster/{name}',
@@ -260,7 +262,9 @@ class Ceph:
         '''
         Find the CephFS file system created by ODF: the `CephFilesystem`
         resource owned by the `StorageCluster` (Rook names the Ceph file
-        system after it).
+        system after it). The owner reference must match the
+        `StorageCluster` name and UID, so a recreated `StorageCluster` of
+        the same name does not own file systems of the old one.
 
         :return:                The file system name.
 
@@ -268,7 +272,7 @@ class Ceph:
             The lookup failed, or not exactly one `CephFilesystem` is owned by
             the `StorageCluster`.
         '''
-        (scName, _) = self._StorageCluster()
+        (scName, scUID, _) = self._StorageCluster()
         result = self.oc.Run(
             'get',
             'CephFilesystem',
@@ -282,7 +286,8 @@ class Ceph:
                 for cfs in json.loads(result.stdout)['items']
                 if any(
                     (ref.get('kind') == 'StorageCluster') and
-                    (ref.get('name') == scName)
+                    (ref.get('name') == scName) and
+                    (ref.get('uid') == scUID)
                     for ref in cfs['metadata'].get('ownerReferences', [])
                 )
             ]
@@ -325,9 +330,13 @@ class Ceph:
         Mark an MDS daemon as failed, to trigger a failover:
         `ceph mds fail <name>`.
 
+        The command completing does not prove the daemon was failed: Ceph
+        can accept it as a no-op, e.g. report on stderr that the daemon is
+        gone, and still exit successfully.
+
         :param name:    MDS daemon name.
 
         :raises RuntimeError:   The command failed.
         '''
         self.Run('mds', 'fail', name)
-        logs.info('Marked MDS daemon `%s` as failed.', name)
+        logs.info('Sent MDS fail for daemon `%s`.', name)
