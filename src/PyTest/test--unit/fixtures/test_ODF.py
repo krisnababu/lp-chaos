@@ -1,5 +1,7 @@
 import dataclasses
-from types import SimpleNamespace
+import importlib.util
+import os
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -7,7 +9,34 @@ import pytest
 import fixtures.ODF as MUT
 
 
-SOURCE_DEFAULT_CONFIG = MUT._DEF__FXT_CFG
+def LoadModule(
+    kubeConfig: str | None,
+    expandUser: mock.Mock,
+) -> ModuleType:
+    '''
+    Import a fresh, isolated `fixtures.ODF` module copy.
+
+    The import-time default configuration resolves `kCfg` from the `KUBECONFIG`
+    environment variable and, as the fallback, from home-directory expansion.
+    Both are controlled here, so the imported defaults never depend on the
+    host environment. Every other collaborator stays real: the module body
+    performs no other external access.
+    '''
+    environment = {
+        key: value for (key, value) in os.environ.items()
+        if (key != 'KUBECONFIG')
+    }
+    if (kubeConfig is not None): environment['KUBECONFIG'] = kubeConfig
+    spec = importlib.util.spec_from_file_location(
+        'ODF__controlledImport', MUT.__file__,
+    )
+    module = importlib.util.module_from_spec(spec)
+    with (
+        mock.patch.dict(os.environ, environment, clear=True),
+        mock.patch('os.path.expanduser', expandUser),
+    ):
+        spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(name='testBoundaries', autouse=True)
@@ -56,14 +85,33 @@ def TestBoundaries(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 def test__DEF__FXT_CFG_UsesNestedCephConfiguration() -> None:
-    cfg = SOURCE_DEFAULT_CONFIG
+    cfg = LoadModule('/synthetic/env/config', mock.Mock())._DEF__FXT_CFG
 
-    assert isinstance(cfg.kCfg, str)
+    assert (cfg.kCfg == '/synthetic/env/config')
     assert (cfg.cliCfg.ocCfg == {})
     assert (cfg.ns == 'openshift-storage')
     assert (cfg.fxtInf.cephCfg.chkHealth is True)
     assert (cfg.fxtInf.cephCfg.timeout == {'toolsReady': '10m'})
     assert (cfg.testPars == {})
+
+
+def test__DEF__FXT_CFG_PrefersKubeconfigEnvVariable() -> None:
+    expandUser = mock.Mock(return_value='/synthetic/home/.kube/config')
+    module = LoadModule('/synthetic/env/config', expandUser)
+
+    assert (module._DEF__FXT_CFG.kCfg == '/synthetic/env/config')
+    expandUser.assert_not_called()
+
+
+@pytest.mark.parametrize('kubeConfig', [None, ''])
+def test__DEF__FXT_CFG_FallsBackToExpandedHomePath(
+    kubeConfig: str | None,
+) -> None:
+    expandUser = mock.Mock(return_value='/synthetic/home/.kube/config')
+    module = LoadModule(kubeConfig, expandUser)
+
+    assert (module._DEF__FXT_CFG.kCfg == '/synthetic/home/.kube/config')
+    expandUser.assert_called_once_with('~/.kube/config')
 
 
 @pytest.mark.parametrize(
