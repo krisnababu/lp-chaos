@@ -11,7 +11,8 @@ from libs.OpenShift.OCP.Infra.Node import Node
 
 
 if TYPE_CHECKING:
-    from fixtures.ODF import FxtObjODF, MDSdiscovery
+    from fixtures.ODF import FxtObjODF
+    from libs.OpenShift.LP.ODF.Ceph import MDSdiscovery
 
 
 logs = logging.getLogger()
@@ -49,10 +50,8 @@ def _ObserveReplacementMDS(
         if not pod: continue
         podSeen = True
         node = Node(nodeName, oc=oc)
-        try: fdStat = standby.FDstat(node)
-        except RuntimeError as error:
-            logs.warning('Could not read MDS FDs: %s', error)
-            fdStat = None
+        # `FDstat()` reports a failed host lookup as `None`.
+        fdStat = standby.FDstat(node)
         if (fdStat is not None):
             (pid, fdCount, fdLim) = fdStat
             (fdFirst, fdMax, _) = fdTrk.get(pid, (fdCount, fdCount, fdLim))
@@ -129,7 +128,7 @@ def _FailoverAfterKubelet(
 
     :return:        The Node, MDS role and failover findings.
     '''
-    (ceph, pars) = (fxtODF.ceph, fxtODF.testPars)
+    (ceph, pars) = (fxtODF.storage.ceph, fxtODF.testPars)
     (standby, stbyNode) = (mds.standby, mds.stbyNode)
     findings = []
 
@@ -147,7 +146,7 @@ def _FailoverAfterKubelet(
         time.sleep(pars.settleSec)
         deadline = time.monotonic() + pars.rolesTO
         while True:
-            try: states = ceph.MDSstates(mds.fsName)
+            try: states = ceph.GetMDSstates(mds.fsName)
             except RuntimeError as error:
                 logs.warning('Could not query Ceph: %s', error)
                 states = {}
@@ -172,7 +171,7 @@ def _FailoverAfterKubelet(
 
     # Failover: the standby-replay MDS must take over the active rank.
     if active:
-        try: ceph.FailMDS(active)
+        try: ceph.MDS.Fail(active)
         except RuntimeError as error:
             findings.append(f'Could not fail MDS `{active}`: {error}')
             return findings
@@ -181,7 +180,7 @@ def _FailoverAfterKubelet(
             time.sleep(pars.pollInt)
             try:
                 (_, checks) = ceph.Health()
-                state = ceph.MDSstates(mds.fsName).get(
+                state = ceph.GetMDSstates(mds.fsName).get(
                     standby.name, '',
                 )
             except RuntimeError as error:
@@ -218,7 +217,7 @@ def _RecoverKubeletStop(
 
     :return:        The recovery failures.
     '''
-    (ceph, oc) = (fxtODF.ceph, fxtODF.cli.oc)
+    (ceph, oc) = (fxtODF.storage.ceph, fxtODF.cli.oc)
     (standby, stbyNode) = (mds.standby, mds.stbyNode)
     healthTO = fxtODF.testPars.healthTO
     clnFail = []
@@ -301,7 +300,7 @@ class TestMDS():
         # Re-check the roles and placement right before the stop: the
         # `Discover()` values are a discovery-time snapshot, and stopping the
         # kubelet of the active MDS Node would test the wrong scenario.
-        states = fxtODF.ceph.MDSstates(mds.fsName)
+        states = fxtODF.storage.ceph.GetMDSstates(mds.fsName)
         (_, nodeName) = standby.Pod()
         assert (
             (states.get(standby.name) == 'up:standby-replay') and
@@ -319,7 +318,7 @@ class TestMDS():
         # recovery runs from here on, even if the stop fails part way.
         upAt = time.monotonic() + (pars.downMin * 60)
         try:
-            assert stbyNode.StopKubelet(pars.downMin), (
+            assert stbyNode.TempStopKubelet(pars.downMin), (
                 f'Could not stop the kubelet on Node `{stbyNode.name}`.'
             )
             findings = _ObserveReplacementMDS(fxtODF, mds, upAt)
