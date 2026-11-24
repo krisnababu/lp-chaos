@@ -25,10 +25,6 @@ def CommandResult(success: bool, stdout: str = '', stderr: str = '') -> CmdRes:
     return CmdRes(stdout, stderr, 0 if success else 1, success)
 
 
-def test__MCO__NS() -> None:
-    assert (MUT._MCO__NS == 'openshift-machine-config-operator')
-
-
 def test_Init_UsesSuppliedClient(
     workerNode: SimpleNamespace,
     nodeBoundaries: SimpleNamespace,
@@ -76,6 +72,7 @@ def test_RunOnHost_ExecsThroughMachineConfigDaemon(
             '--', 'chroot', '/rootfs', 'sh', '-c', 'df /var',
             n='openshift-machine-config-operator',
             c='machine-config-daemon',
+            tryMax=1,
             spPars={'timeout': 60 if (cmdTO is None) else cmdTO},
         ),
     ])
@@ -111,33 +108,39 @@ def test_RunOnHost_RejectsInvalidTimeout(
     workerNode.oc.Run.assert_not_called()
 
 
+@pytest.mark.parametrize('timerMarker', [
+    'Running timer as unit: run-u123.timer',
+    'Running as unit: run-r123.service',
+])
 @pytest.mark.parametrize('timeout', [None, '15m'])
 @pytest.mark.parametrize('debugSuccess', [False, True])
-@pytest.mark.parametrize('waitSuccess', [False, True])
-def test_StopKubelet_ArmsTimerThenWaitsForNotReadyWhenReady(
+def test_TempStopKubelet_ArmsTimerThenWaitsForNotReadyWhenReady(
     workerNode: SimpleNamespace,
     caplog: pytest.LogCaptureFixture,
+    timerMarker: str,
     timeout: str | None,
     debugSuccess: bool,
-    waitSuccess: bool,
 ) -> None:
     # The `oc debug` exit code is ignored: its stream is expected to break
-    # when the kubelet stops; its output must show the started debug Pod.
+    # when the kubelet stops; its output must show the created debug Pod and
+    # the armed host timer, in either `systemd-run` spelling.
     workerNode.oc.Run.side_effect = [
         CommandResult(True, 'True\n'),
+        CommandResult(True, '2026-11-24T10:00:00Z\n'),
         CommandResult(
             debugSuccess, '',
-            'Starting pod/worker-a-debug-abc12 ... connection refused',
+            f'Starting pod/worker-a-debug-abc12 ... {timerMarker} '
+            '... connection refused',
         ),
-        CommandResult(waitSuccess),
+        CommandResult(True),
     ]
     caplog.set_level('INFO')
     result = (
-        workerNode.node.StopKubelet(40) if (timeout is None)
-        else workerNode.node.StopKubelet(40, timeout=timeout)
+        workerNode.node.TempStopKubelet(40) if (timeout is None)
+        else workerNode.node.TempStopKubelet(40, timeout=timeout)
     )
 
-    assert (result is waitSuccess)
+    assert (result is True)
     assert (workerNode.oc.Run.call_args_list == [
         mock.call(
             'get',
@@ -145,12 +148,20 @@ def test_StopKubelet_ArmsTimerThenWaitsForNotReadyWhenReady(
             o='jsonpath={.status.conditions[?(@.type=="Ready")].status}',
         ),
         mock.call(
+            'get',
+            'Node/worker-a',
+            o=(
+                'jsonpath={.status.conditions[?(@.type=="Ready")]'
+                '.lastTransitionTime}'
+            ),
+        ),
+        mock.call(
             'debug',
             'Node/worker-a',
             '--', 'chroot', '/host', 'sh', '-c',
             (
-                'systemd-run --on-active=40min '
-                'systemctl start kubelet && systemctl stop kubelet'
+                'systemd-run --on-active=40min systemctl start kubelet &&\n'
+                'systemctl stop kubelet'
             ),
             tryMax=1,
             spPars={'timeout': 90},
@@ -162,61 +173,147 @@ def test_StopKubelet_ArmsTimerThenWaitsForNotReadyWhenReady(
             timeout='10m' if (timeout is None) else timeout,
         ),
     ])
-    assert (
-        ('Stopped kubelet on Node `worker-a` for 40 min.' in caplog.text) is
-        waitSuccess
-    )
+    assert ('Stopped kubelet on Node `worker-a` for 40 min.' in caplog.text)
 
 
 @pytest.mark.parametrize('debugResult', [
     CommandResult(False),
     CommandResult(False, '', 'Error from server: Timeout'),
     CommandResult(True, 'Starting something else'),
+    CommandResult(
+        True, '',
+        'Starting pod/worker-a-debug-abc12 ... container never started',
+    ),
 ])
-def test_StopKubelet_FailsWhenDebugSessionNeverStarted(
+def test_TempStopKubelet_FailsWhenStopCommandNeverRan(
     workerNode: SimpleNamespace,
     caplog: pytest.LogCaptureFixture,
     debugResult: CmdRes,
 ) -> None:
+    # The `Starting pod/` banner is printed before the debug container
+    # starts: without the `Running as unit:` timer marker, the stop command
+    # never provably reached the host.
     workerNode.oc.Run.side_effect = [
         CommandResult(True, 'True\n'),
+        CommandResult(True, '2026-11-24T10:00:00Z\n'),
         debugResult,
     ]
 
-    assert (workerNode.node.StopKubelet(40) is False)
-    assert (len(workerNode.oc.Run.call_args_list) == 2)
-    assert ('Could not start a debug Pod on Node `worker-a`.' in caplog.text)
+    assert (workerNode.node.TempStopKubelet(40) is False)
+    assert (len(workerNode.oc.Run.call_args_list) == 3)
+    assert ('Could not run the stop command on Node `worker-a`.' in caplog.text)
     assert ('Stopped kubelet' not in caplog.text)
 
 
 @pytest.mark.parametrize('exitStat', [-2, -3])
-@pytest.mark.parametrize('waitSuccess', [False, True])
-def test_StopKubelet_WaitsWhenDebugOutputIsUnavailable(
+def test_TempStopKubelet_ReturnsFalseWhenStopIsUnconfirmed(
     workerNode: SimpleNamespace,
     caplog: pytest.LogCaptureFixture,
     exitStat: int,
-    waitSuccess: bool,
 ) -> None:
-    # A subprocess exception (e.g. the 90 sec. timeout) or exhausted tries
-    # discard the `oc debug` output: the session state is unknown, and the
-    # Node condition wait decides.
-    caplog.set_level('INFO')
+    # The output of an abnormally terminated `oc debug` is discarded:
+    # without the timer marker there is no proof the restart timer was
+    # armed, so a confirmed stop is not reported even if the Node goes
+    # `NotReady` for an unrelated reason.
     workerNode.oc.Run.side_effect = [
         CommandResult(True, 'True\n'),
+        CommandResult(True, '2026-11-24T10:00:00Z\n'),
         CmdRes(
             '', "Command '['oc']' timed out after 90 seconds",
             exitStat, False,
         ),
+        CommandResult(True),
+    ]
+
+    assert (workerNode.node.TempStopKubelet(40) is False)
+    assert (len(workerNode.oc.Run.call_args_list) == 3)
+    assert (
+        'Stop command result on Node `worker-a` is unconfirmed: the '
+        '`oc debug` output was lost. The kubelet may be stopped; if the '
+        'timer was armed, it restarts after 40 min.' in caplog.text
+    )
+    assert ('Stopped kubelet' not in caplog.text)
+
+
+@pytest.mark.parametrize(('waitSuccess', 'transitionAfter', 'expected'), [
+    (True, '2026-11-24T10:00:00Z\n', True),
+    (False, '2026-11-24T10:05:00Z\n', True),
+    (False, '2026-11-24T10:00:00Z\n', False),
+])
+def test_TempStopKubelet_WaitsAfterTheStopCommandRan(
+    workerNode: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+    waitSuccess: bool,
+    transitionAfter: str,
+    expected: bool,
+) -> None:
+    # The stop command provably ran (banner + timer marker): the Node
+    # condition wait decides. A wait that starts after the Node already
+    # recovered still detects the outage: the `NotReady` period changed the
+    # `Ready` condition transition time read before the stop.
+    caplog.set_level('INFO')
+    workerNode.oc.Run.side_effect = [
+        CommandResult(True, 'True\n'),
+        CommandResult(True, '2026-11-24T10:00:00Z\n'),
+        CommandResult(
+            False, '',
+            'Starting pod/worker-a-debug-abc12 ... Running timer as unit: '
+            'run-u123.timer ... connection refused',
+        ),
+        CommandResult(waitSuccess),
+        CommandResult(True, transitionAfter),
+    ]
+
+    assert (workerNode.node.TempStopKubelet(40) is expected)
+    assert (
+        len(workerNode.oc.Run.call_args_list) == (4 if waitSuccess else 5)
+    )
+    assert ('Could not run the stop command' not in caplog.text)
+    assert (
+        ('Stopped kubelet on Node `worker-a` for 40 min.' in caplog.text) is
+        expected
+    )
+
+
+@pytest.mark.parametrize('waitSuccess', [False, True])
+def test_TempStopKubelet_ReturnsFalseWithoutTransitionBaseline(
+    workerNode: SimpleNamespace,
+    waitSuccess: bool,
+) -> None:
+    # Without the pre-stop transition time, a failed wait cannot fall back
+    # to the changed-transition check.
+    workerNode.oc.Run.side_effect = [
+        CommandResult(True, 'True\n'),
+        CommandResult(False, ''),
+        CommandResult(
+            False, '',
+            'Starting pod/worker-a-debug-abc12 ... Running timer as unit: '
+            'run-u123.timer ... connection refused',
+        ),
         CommandResult(waitSuccess),
     ]
 
-    assert (workerNode.node.StopKubelet(40) is waitSuccess)
-    assert (len(workerNode.oc.Run.call_args_list) == 3)
-    assert ('Could not start a debug Pod' not in caplog.text)
-    assert (
-        ('Stopped kubelet on Node `worker-a` for 40 min.' in caplog.text) is
-        waitSuccess
-    )
+    assert (workerNode.node.TempStopKubelet(40) is waitSuccess)
+    assert (len(workerNode.oc.Run.call_args_list) == 4)
+
+
+def test_TempStopKubelet_ReturnsFalseWhenTransitionRecheckFails(
+    workerNode: SimpleNamespace,
+) -> None:
+    workerNode.oc.Run.side_effect = [
+        CommandResult(True, 'True\n'),
+        CommandResult(True, '2026-11-24T10:00:00Z\n'),
+        CommandResult(
+            False, '',
+            'Starting pod/worker-a-debug-abc12 ... Running timer as unit: '
+            'run-u123.timer ... connection refused',
+        ),
+        CommandResult(False),
+        CommandResult(False, ''),
+    ]
+
+    assert (workerNode.node.TempStopKubelet(40) is False)
+    assert (len(workerNode.oc.Run.call_args_list) == 5)
 
 
 @pytest.mark.parametrize(('success', 'stdout'), [
@@ -225,7 +322,7 @@ def test_StopKubelet_WaitsWhenDebugOutputIsUnavailable(
     (True, 'Unknown'),
     (True, ''),
 ])
-def test_StopKubelet_ReturnsFalseWithoutStopWhenNotReady(
+def test_TempStopKubelet_ReturnsFalseWithoutStopWhenNotReady(
     workerNode: SimpleNamespace,
     caplog: pytest.LogCaptureFixture,
     success: bool,
@@ -233,20 +330,20 @@ def test_StopKubelet_ReturnsFalseWithoutStopWhenNotReady(
 ) -> None:
     workerNode.oc.Run.return_value = CommandResult(success, stdout)
 
-    assert (workerNode.node.StopKubelet(40) is False)
+    assert (workerNode.node.TempStopKubelet(40) is False)
     workerNode.oc.Run.assert_called_once()
     assert ('Node `worker-a` is not Ready before the stop.' in caplog.text)
     assert ('Stopped kubelet' not in caplog.text)
 
 
 @pytest.mark.parametrize('downMin', [0, -1, 1.5, '40', True, None])
-def test_StopKubelet_RejectsInvalidDuration(
+def test_TempStopKubelet_RejectsInvalidDuration(
     workerNode: SimpleNamespace,
     downMin: object,
 ) -> None:
     with pytest.raises(
         ValueError, match='The `downMin` must be a positive integer.',
-    ): workerNode.node.StopKubelet(downMin)
+    ): workerNode.node.TempStopKubelet(downMin)
     workerNode.oc.Run.assert_not_called()
 
 

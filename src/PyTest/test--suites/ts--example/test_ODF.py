@@ -27,11 +27,14 @@ class TestODF():
     @pytest.mark.odf
     def test_MDSdiscovery(self, fxtODF: 'FxtObjODF') -> None:
         '''Check the discovered MDS daemon roles, Pods, and Nodes.'''
+        # The discovery result is a snapshot: assert on it directly, not on
+        # a second live query that a failover could change mid-test.
         mds = fxtODF.storage.ceph.MDS.Discover()
-        states = fxtODF.ceph.MDSstates(mds.fsName)
-        logs.info('File system `%s` MDS states: %s.', mds.fsName, states)
-        assert (states.get(mds.active.name) == 'up:active')
-        assert (states.get(mds.standby.name) == 'up:standby-replay')
+        logs.info(
+            'File system `%s`: active MDS `%s`, standby-replay MDS `%s`.',
+            mds.fsName, mds.active.name, mds.standby.name,
+        )
+        assert (mds.active.name != mds.standby.name)
         for (role, daemon, node) in (
             ('active', mds.active, mds.activeNode),
             ('standby-replay', mds.standby, mds.stbyNode),

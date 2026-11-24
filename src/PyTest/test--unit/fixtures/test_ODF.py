@@ -46,7 +46,7 @@ def TestBoundaries(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     cephFactory = mock.Mock()
     ceph = cephFactory.return_value
-    ceph.EnableTools.return_value = True
+    ceph.EnableTools.return_value = ('synthetic-sc', 'synthetic-uid')
     ceph.Health.return_value = ('HEALTH_OK', set())
     sysModule = SimpleNamespace(
         exc_info=mock.Mock(return_value=(None, None, None)),
@@ -65,22 +65,15 @@ def TestBoundaries(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     defaults = mock.MagicMock()
     defaults.__or__.return_value = final
     logs = mock.Mock()
-    mdsFactory = mock.Mock(side_effect=lambda name, ceph: SimpleNamespace(
-        name=name, ceph=ceph, Pod=mock.Mock(return_value=('pod', 'node')),
-    ))
-    nodeFactory = mock.Mock()
     monkeypatch.setattr(MUT, 'NamedDict', namedDict)
     monkeypatch.setattr(MUT, 'Ceph', cephFactory)
     monkeypatch.setattr(MUT, 'sys', sysModule)
     monkeypatch.setattr(MUT, 'logs', logs)
     monkeypatch.setattr(MUT, '_DEF__FXT_CFG', defaults)
-    monkeypatch.setattr(MUT, 'MDS', mdsFactory)
-    monkeypatch.setattr(MUT, 'Node', nodeFactory)
     return SimpleNamespace(
         namedDict=namedDict, cephFactory=cephFactory, ceph=ceph,
         sysModule=sysModule, cephCfg=cephCfg, final=final,
         defaults=defaults, logs=logs,
-        mdsFactory=mdsFactory, nodeFactory=nodeFactory,
     )
 
 
@@ -115,7 +108,7 @@ def test__DEF__FXT_CFG_FallsBackToExpandedHomePath(
 
 
 @pytest.mark.parametrize(
-    'field', ['ceph', 'storage', 'fxtInf', 'testPars', 'cli', 'ns'],
+    'field', ['cli', 'ns', 'fxtInf', 'testPars', 'storage'],
 )
 def test_FxtODF_YieldsFrozenObjectAndRestoresToolbox(
     testBoundaries: SimpleNamespace,
@@ -132,9 +125,10 @@ def test_FxtODF_YieldsFrozenObjectAndRestoresToolbox(
         assert isinstance(context, MUT.FxtObjODF)
         assert (
             {item.name for item in dataclasses.fields(context)} ==
-            {'ceph', 'storage', 'fxtInf', 'testPars', 'cli', 'ns'}
+            {'cli', 'ns', 'fxtInf', 'testPars', 'storage'}
         )
-        assert (context.ceph is testBoundaries.ceph)
+        assert isinstance(context.storage, MUT.ODFstorage)
+        assert (context.storage.ceph is testBoundaries.ceph)
         assert (context.fxtInf is testBoundaries.final.fxtInf)
         assert (context.testPars is testBoundaries.final.testPars)
         assert (context.cli.oc is ocFactory.return_value)
@@ -157,7 +151,9 @@ def test_FxtODF_YieldsFrozenObjectAndRestoresToolbox(
         assert (getattr(context, field) is original)
         with pytest.raises(StopIteration):
             next(generator)
-        testBoundaries.ceph.DisableTools.assert_called_once_with(True)
+        testBoundaries.ceph.DisableTools.assert_called_once_with(
+            ('synthetic-sc', 'synthetic-uid'),
+        )
         testBoundaries.logs.info.assert_called_once_with(
             'The `fxtODF` fixture teardown complete.',
         )
@@ -165,36 +161,21 @@ def test_FxtODF_YieldsFrozenObjectAndRestoresToolbox(
         generator.close()
 
 
-def test_FxtODF_BindsLazyStorageOperationsToTheCephContext(
+def test_FxtODF_YieldsTheClusterStorageAndKeepsDiscoveryLazy(
     testBoundaries: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    discoverMDS = mock.Mock()
-    monkeypatch.setattr(MUT, 'DiscoverMDS', discoverMDS)
     ocFactory = mock.Mock()
     generator = MUT.FxtODF.__wrapped__(SimpleNamespace(), ocFactory)
     try:
         context = next(generator)
-        # Lazy: the fixture setup neither discovers MDS nor queries their
-        # states.
-        discoverMDS.assert_not_called()
-        testBoundaries.ceph.MDSstates.assert_not_called()
-        # The bound `Health` is the `Ceph` context's own method.
-        assert (context.storage.ceph.Health is testBoundaries.ceph.Health)
-        context.storage.ceph.Health()
-        assert (testBoundaries.ceph.Health.call_count == 2)
-        testBoundaries.ceph.Health.assert_called_with()
-        # The bound `Discover` routes to `DiscoverMDS()` with the fixture's
-        # Ceph and CLI context, and accepts the file system as an argument.
-        discover = context.storage.ceph.MDS.Discover
-        discover()
-        discoverMDS.assert_called_once_with(
-            ceph=testBoundaries.ceph, oc=ocFactory.return_value,
-        )
-        discover(fsName='fs2')
-        discoverMDS.assert_called_with(
-            fsName='fs2', ceph=testBoundaries.ceph, oc=ocFactory.return_value,
-        )
+        # The storage holds the fixture's `Ceph` instance, so its health and
+        # MDS operations are the cluster's own.
+        assert isinstance(context.storage, MUT.ODFstorage)
+        assert (context.storage.ceph is testBoundaries.ceph)
+        # Lazy: the fixture setup queries neither the MDS states nor the ODF
+        # file system.
+        testBoundaries.ceph.GetMDSstates.assert_not_called()
+        testBoundaries.ceph.GetODFfsName.assert_not_called()
     finally:
         generator.close()
 
@@ -213,9 +194,6 @@ def test_FxtODF_UsesDefaultConfigurationWithAbsentOrEmptyRequestParam(
         next(generator)
         assert (testBoundaries.namedDict.call_args_list == [
             mock.call(),
-            mock.call(Discover=mock.ANY),
-            mock.call(Health=testBoundaries.ceph.Health, MDS=mock.ANY),
-            mock.call(ceph=mock.ANY),
             mock.call(oc=ocFactory.return_value),
         ])
         ocFactory.assert_called_once_with(
@@ -232,18 +210,18 @@ def test_FxtODF_SkipsHealthCheckWhenDisabled(
     testBoundaries.ceph.Health.return_value = ('HEALTH_ERR', {'X'})
     generator = MUT.FxtODF.__wrapped__(SimpleNamespace(), mock.Mock())
     try:
-        assert (next(generator).ceph is testBoundaries.ceph)
+        assert (next(generator).storage.ceph is testBoundaries.ceph)
         testBoundaries.ceph.Health.assert_not_called()
     finally:
         generator.close()
 
 
-@pytest.mark.parametrize('toolsOn', [False, True])
+@pytest.mark.parametrize('toolsOwner', [None, ('synthetic-sc', 'synthetic-uid')])
 def test_FxtODF_RaisesWhenUnhealthyAndRestoresToolbox(
     testBoundaries: SimpleNamespace,
-    toolsOn: bool,
+    toolsOwner: object,
 ) -> None:
-    testBoundaries.ceph.EnableTools.return_value = toolsOn
+    testBoundaries.ceph.EnableTools.return_value = toolsOwner
     testBoundaries.ceph.Health.return_value = (
         'HEALTH_WARN', {'MDS_SLOW_METADATA_IO', 'FS_DEGRADED'},
     )
@@ -260,7 +238,7 @@ def test_FxtODF_RaisesWhenUnhealthyAndRestoresToolbox(
             r"\['FS_DEGRADED', 'MDS_SLOW_METADATA_IO'\]."
         ),
     ): next(generator)
-    testBoundaries.ceph.DisableTools.assert_called_once_with(toolsOn)
+    testBoundaries.ceph.DisableTools.assert_called_once_with(toolsOwner)
 
 
 def test_FxtODF_RaisesWhenToolboxUnavailable(
@@ -276,7 +254,7 @@ def test_FxtODF_RaisesWhenToolboxUnavailable(
     with pytest.raises(RuntimeError) as raised: next(generator)
     assert (raised.value is error)
     testBoundaries.ceph.Health.assert_not_called()
-    testBoundaries.ceph.DisableTools.assert_called_once_with(False)
+    testBoundaries.ceph.DisableTools.assert_called_once_with(None)
 
 
 def test_FxtODF_RaisesTeardownErrorWithoutPrimaryException(
@@ -312,191 +290,3 @@ def test_FxtODF_PreservesPrimaryExceptionOverTeardownError(
     testBoundaries.logs.info.assert_called_once_with(
         'The `fxtODF` fixture teardown complete.',
     )
-
-
-def MDScontext() -> tuple[mock.Mock, mock.Mock]:
-    ceph = mock.Mock()
-    ceph.ODFfsName.return_value = 'fs'
-    ceph.MDSstates.return_value = {
-        'fs-a': 'up:active', 'fs-b': 'up:standby-replay',
-    }
-    return (ceph, mock.Mock())
-
-
-def MDSpods(
-    testBoundaries: SimpleNamespace,
-    pods: dict[str, tuple[str, str]],
-) -> None:
-    def Make(name: str, ceph: object) -> SimpleNamespace:
-        return SimpleNamespace(
-            name=name, ceph=ceph, Pod=mock.Mock(return_value=pods[name]),
-        )
-    testBoundaries.mdsFactory.side_effect = Make
-
-
-@pytest.mark.parametrize(
-    'field', ['fsName', 'active', 'standby', 'activeNode', 'stbyNode'],
-)
-def test_DiscoverMDS_ReturnsFrozenRolesOfTheODFfileSystem(
-    testBoundaries: SimpleNamespace,
-    field: str,
-) -> None:
-    (ceph, oc) = MDScontext()
-    MDSpods(testBoundaries, {
-        'fs-a': ('mds-a-pod', 'worker-a'),
-        'fs-b': ('mds-b-pod', 'worker-b'),
-    })
-    nodes = {'worker-a': mock.Mock(), 'worker-b': mock.Mock()}
-    testBoundaries.nodeFactory.side_effect = lambda name, oc: nodes[name]
-
-    context = MUT.DiscoverMDS(ceph=ceph, oc=oc)
-    assert isinstance(context, MUT.MDSdiscovery)
-    assert (
-        {item.name for item in dataclasses.fields(context)} ==
-        {'fsName', 'active', 'standby', 'activeNode', 'stbyNode'}
-    )
-    assert (context.fsName == 'fs')
-    assert (context.active.name == 'fs-a')
-    assert (context.standby.name == 'fs-b')
-    assert (context.active.ceph is ceph)
-    assert (context.activeNode is nodes['worker-a'])
-    assert (context.stbyNode is nodes['worker-b'])
-    assert (testBoundaries.nodeFactory.call_args_list == [
-        mock.call('worker-a', oc=oc),
-        mock.call('worker-b', oc=oc),
-    ])
-    ceph.ODFfsName.assert_called_once_with()
-    assert (ceph.MDSstates.call_count == 2)
-    ceph.MDSstates.assert_called_with('fs')
-    testBoundaries.namedDict.assert_not_called()
-    original = getattr(context, field)
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        setattr(context, field, object())
-    assert (getattr(context, field) is original)
-
-
-def test_DiscoverMDS_UsesConfiguredFileSystem(
-    testBoundaries: SimpleNamespace,
-) -> None:
-    (ceph, oc) = MDScontext()
-    MDSpods(testBoundaries, {
-        'fs-a': ('mds-a-pod', 'worker-a'),
-        'fs-b': ('mds-b-pod', 'worker-b'),
-    })
-    testBoundaries.nodeFactory.side_effect = lambda name, oc: mock.Mock()
-
-    context = MUT.DiscoverMDS(fsName='fs2', ceph=ceph, oc=oc)
-    assert (context.fsName == 'fs2')
-    ceph.ODFfsName.assert_not_called()
-    assert (ceph.MDSstates.call_count == 2)
-    ceph.MDSstates.assert_called_with('fs2')
-
-
-def test_DiscoverMDS_RequeriesCurrentRolesOnEveryCall(
-    testBoundaries: SimpleNamespace,
-) -> None:
-    (ceph, oc) = MDScontext()
-    ceph.MDSstates.side_effect = [
-        {'fs-a': 'up:active', 'fs-b': 'up:standby-replay'},
-        {'fs-a': 'up:active', 'fs-b': 'up:standby-replay'},
-        {'fs-b': 'up:active', 'fs-a': 'up:standby-replay'},
-        {'fs-b': 'up:active', 'fs-a': 'up:standby-replay'},
-    ]
-    MDSpods(testBoundaries, {
-        'fs-a': ('mds-a-pod', 'worker-a'),
-        'fs-b': ('mds-b-pod', 'worker-b'),
-    })
-    testBoundaries.nodeFactory.side_effect = lambda name, oc: mock.Mock()
-
-    first = MUT.DiscoverMDS(ceph=ceph, oc=oc)
-    second = MUT.DiscoverMDS(ceph=ceph, oc=oc)
-    assert (first.active.name == 'fs-a')
-    assert (first.standby.name == 'fs-b')
-    assert (second.active.name == 'fs-b')
-    assert (second.standby.name == 'fs-a')
-    assert (ceph.ODFfsName.call_count == 2)
-    assert (ceph.MDSstates.call_count == 4)
-
-
-def test_DiscoverMDS_RaisesWhenRolesChangeDuringDiscovery(
-    testBoundaries: SimpleNamespace,
-) -> None:
-    (ceph, oc) = MDScontext()
-    ceph.MDSstates.side_effect = [
-        {'fs-a': 'up:active', 'fs-b': 'up:standby-replay'},
-        {'fs-b': 'up:active', 'fs-a': 'up:standby-replay'},
-    ]
-    MDSpods(testBoundaries, {
-        'fs-a': ('mds-a-pod', 'worker-a'),
-        'fs-b': ('mds-b-pod', 'worker-b'),
-    })
-    testBoundaries.nodeFactory.side_effect = lambda name, oc: mock.Mock()
-
-    with pytest.raises(RuntimeError) as raised:
-        MUT.DiscoverMDS(ceph=ceph, oc=oc)
-    assert (str(raised.value) == (
-        'Prerequisites not met: MDS roles of `fs` changed during '
-        'discovery; discover again.'
-    ))
-    assert (ceph.MDSstates.call_count == 2)
-
-
-def test_DiscoverMDS_RaisesWithoutODFfileSystem(
-    testBoundaries: SimpleNamespace,
-) -> None:
-    (ceph, oc) = MDScontext()
-    ceph.ODFfsName.side_effect = RuntimeError('no owned fs')
-
-    with pytest.raises(RuntimeError) as raised:
-        MUT.DiscoverMDS(ceph=ceph, oc=oc)
-    assert (str(raised.value) == 'Prerequisites not met: no owned fs')
-    assert (raised.value.__cause__ is None)
-    ceph.MDSstates.assert_not_called()
-
-
-@pytest.mark.parametrize('states', [
-    {},
-    {'fs-a': 'up:active'},
-    {'fs-b': 'up:standby-replay'},
-    {'fs-a': 'up:active', 'fs-b': 'up:standby'},
-    {
-        'fs-a': 'up:active', 'fs-b': 'up:standby-replay',
-        'fs-c': 'up:active',
-    },
-    {
-        'fs-a': 'up:active', 'fs-b': 'up:standby-replay',
-        'fs-c': 'up:standby-replay',
-    },
-])
-def test_DiscoverMDS_RaisesWithoutOneActiveAndOneStandbyReplay(
-    testBoundaries: SimpleNamespace,
-    states: dict[str, str],
-) -> None:
-    (ceph, oc) = MDScontext()
-    ceph.MDSstates.return_value = states
-
-    with pytest.raises(RuntimeError) as raised:
-        MUT.DiscoverMDS(ceph=ceph, oc=oc)
-    assert (str(raised.value) == (
-        'Prerequisites not met: expected one active and one '
-        f'standby-replay MDS in `fs`, got: {states}.'
-    ))
-    testBoundaries.mdsFactory.assert_not_called()
-
-
-@pytest.mark.parametrize('missing', ['fs-a', 'fs-b'])
-def test_DiscoverMDS_RaisesWithoutRunningPod(
-    testBoundaries: SimpleNamespace,
-    missing: str,
-) -> None:
-    (ceph, oc) = MDScontext()
-    pods = {'fs-a': ('mds-a-pod', 'worker-a'), 'fs-b': ('mds-b-pod', 'w-b')}
-    pods[missing] = ('', '')
-    MDSpods(testBoundaries, pods)
-
-    with pytest.raises(
-        RuntimeError,
-        match=f'Prerequisites not met: no Running Pod for MDS `{missing}`.',
-    ): MUT.DiscoverMDS(ceph=ceph, oc=oc)
-    nodeCalls = 1 if (missing == 'fs-b') else 0
-    assert (testBoundaries.nodeFactory.call_count == nodeCalls)
