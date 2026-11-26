@@ -41,27 +41,48 @@ def _ObserveReplacementMDS(
     # process (PID): a restarted process starts a new count, and the FD
     # limit check uses the current process only. The first log read covers
     # the time since the observation start, each later read the time since
-    # the last successful read.
+    # the last successful read. Only probes that start and complete within
+    # the outage count: samples taken after the kubelet is back cannot
+    # support the prerequisite assertions.
     (fdTrk, emfile, limAt) = ({}, 0, None)
     (podSeen, logRead, logAt) = (False, False, time.monotonic())
-    while (time.monotonic() < upAt):
-        time.sleep(pars.pollInt)
+    while True:
+        remTO = upAt - time.monotonic()
+        if (remTO <= 0):
+            break
+        time.sleep(min(pars.pollInt, remTO))
+        if (time.monotonic() >= upAt):
+            break
         (pod, nodeName) = standby.Pod(exclNode=stbyNode.name)
-        if not pod: continue
-        podSeen = True
+        if not pod:
+            continue
         node = Node(nodeName, oc=oc)
         # `FDstat()` reports a failed host lookup as `None`.
         fdStat = standby.FDstat(node)
-        if (fdStat is not None):
-            (pid, fdCount, fdLim) = fdStat
-            (fdFirst, fdMax, _) = fdTrk.get(pid, (fdCount, fdCount, fdLim))
-            fdTrk[pid] = (fdFirst, max(fdMax, fdCount), fdLim)
         readAt = time.monotonic()
         count = standby.LogCount(
             pod,
             'too many open files|EMFILE',
             since=f'{math.ceil(readAt - logAt)}s',
         )
+        try:
+            var = node.RunOnHost("df -P /var | awk 'NR == 2 {print $5}'")
+            varPct = var.stdout.strip().rstrip('%') if var.success else ''
+        except RuntimeError as error:
+            logs.warning('Could not read `/var` usage: %s', error)
+            varPct = ''
+        if (time.monotonic() > upAt):
+            logs.info(
+                'Probe of MDS `%s` ran across the outage end; its '
+                'samples are dropped.',
+                standby.name,
+            )
+            continue
+        podSeen = True
+        if (fdStat is not None):
+            (pid, fdCount, fdLim) = fdStat
+            (fdFirst, fdMax, _) = fdTrk.get(pid, (fdCount, fdCount, fdLim))
+            fdTrk[pid] = (fdFirst, max(fdMax, fdCount), fdLim)
         if (count >= 0):
             (emfile, logRead, logAt) = (emfile + count, True, readAt)
         logs.info(
@@ -70,12 +91,6 @@ def _ObserveReplacementMDS(
             f'{fdCount}/{fdLim}' if (fdStat is not None) else 'unknown',
             emfile,
         )
-        try:
-            var = node.RunOnHost("df -P /var | awk 'NR == 2 {print $5}'")
-            varPct = var.stdout.strip().rstrip('%') if var.success else ''
-        except RuntimeError as error:
-            logs.warning('Could not read `/var` usage: %s', error)
-            varPct = ''
         if (varPct.isdigit() and (int(varPct) > pars.varMaxPct)):
             logs.warning('Node `%s` `/var` is almost full.', nodeName)
             findings.append(
@@ -86,7 +101,14 @@ def _ObserveReplacementMDS(
         if ((fdStat is not None) and fdLim and (fdCount >= fdLim)):
             if ((limAt is None) or (limAt[0] != pid)):
                 limAt = (pid, time.monotonic())
-            if (emfile or (time.monotonic() - limAt[1] >= pars.emfileWait)):
+            if (emfile):
+                break
+            if (time.monotonic() - limAt[1] >= pars.emfileWait):
+                findings.append(
+                    f'Observation incomplete: MDS `{standby.name}` (PID '
+                    f'{pid}) stayed at its FD limit for {pars.emfileWait} '
+                    'sec. without logging `EMFILE`'
+                )
                 break
     assert podSeen, (
         f'Prerequisites not met: replacement MDS `{standby.name}` Pod '
@@ -146,7 +168,8 @@ def _FailoverAfterKubelet(
         time.sleep(pars.settleSec)
         deadline = time.monotonic() + pars.rolesTO
         while True:
-            try: states = ceph.GetMDSstates(mds.fsName)
+            try:
+                states = ceph.GetMDSstates(mds.fsName)
             except RuntimeError as error:
                 logs.warning('Could not query Ceph: %s', error)
                 states = {}
@@ -156,7 +179,8 @@ def _FailoverAfterKubelet(
             ]
             if (
                 (states.get(standby.name) == 'up:standby-replay') and
-                (len(actives) == 1)
+                (len(actives) == 1) and
+                (time.monotonic() <= deadline)
             ):
                 active = actives[0]
                 break
@@ -167,17 +191,26 @@ def _FailoverAfterKubelet(
                     f'{states})'
                 )
                 break
-            time.sleep(pars.pollInt)
+            time.sleep(min(pars.pollInt, deadline - time.monotonic()))
 
     # Failover: the standby-replay MDS must take over the active rank.
     if active:
-        try: ceph.MDS.Fail(active)
+        try:
+            ceph.MDS.Fail(active)
         except RuntimeError as error:
             findings.append(f'Could not fail MDS `{active}`: {error}')
             return findings
         deadline = time.monotonic() + pars.failoverTO
         while True:
-            time.sleep(pars.pollInt)
+            if ((remTO := (deadline - time.monotonic())) <= 0):
+                findings.append(
+                    f'MDS `{standby.name}` did not take over '
+                    f'{pars.failoverTO} sec. after failing MDS '
+                    f'`{active}` (state: `{state}`, checks: '
+                    f'{sorted(checks)})'
+                )
+                break
+            time.sleep(min(pars.pollInt, remTO))
             try:
                 (_, checks) = ceph.Health()
                 state = ceph.GetMDSstates(mds.fsName).get(
@@ -186,15 +219,11 @@ def _FailoverAfterKubelet(
             except RuntimeError as error:
                 logs.warning('Could not query Ceph: %s', error)
                 (checks, state) = ({'UNKNOWN'}, '')
-            if (('FS_DEGRADED' not in checks) and (state == 'up:active')):
-                break
-            if (time.monotonic() >= deadline):
-                findings.append(
-                    f'MDS `{standby.name}` did not take over '
-                    f'{pars.failoverTO} sec. after failing MDS '
-                    f'`{active}` (state: `{state}`, checks: '
-                    f'{sorted(checks)})'
-                )
+            if (
+                ('FS_DEGRADED' not in checks) and
+                (state == 'up:active') and
+                (time.monotonic() <= deadline)
+            ):
                 break
 
     return findings
@@ -230,21 +259,33 @@ def _RecoverKubeletStop(
         time.sleep(remTO)
     if not stbyNode.WaitReady():
         clnFail.append(f'Node `{stbyNode.name}` is not Ready')
-    if not oc.Run(
-        'delete',
-        'Pod',
-        n=fxtODF.ns,
-        l=f'app=rook-ceph-mds,ceph_daemon_id={standby.name}',
-        ignore_not_found=True, timeout='5m', wait='true',
-    ).success:
+    try:
+        clnRes = oc.Run(
+            'delete',
+            'Pod',
+            n=fxtODF.ns,
+            l=f'app=rook-ceph-mds,ceph_daemon_id={standby.name}',
+            ignore_not_found=True, timeout='5m', wait='true',
+        )
+    except OSError as error:
+        # `oc.Run()` reports the errors it catches as a failed `CmdRes`;
+        # anything it lets raise must not skip the health poll below.
+        logs.warning(
+            'Could not delete MDS `%s` Pods: %s', standby.name, error
+        )
+        clnRes = None
+    if ((clnRes is None) or (not clnRes.success)):
         clnFail.append(f'Could not delete MDS `{standby.name}` Pods')
-    else: logs.info('Deleted the Pods of MDS `%s`.', standby.name)
+    else:
+        logs.info('Deleted the Pods of MDS `%s`.', standby.name)
     startAt = time.monotonic()
     deadline = startAt + healthTO
     while True:
-        try: (status, _) = ceph.Health()
-        except RuntimeError: status = ''
-        if (status == 'HEALTH_OK'):
+        try:
+            (status, _) = ceph.Health()
+        except RuntimeError:
+            status = ''
+        if ((status == 'HEALTH_OK') and (time.monotonic() <= deadline)):
             logs.info(
                 'Ceph is `HEALTH_OK` after %d sec.',
                 time.monotonic() - startAt,
@@ -297,9 +338,14 @@ class TestMDS():
         )
         (standby, stbyNode) = (mds.standby, mds.stbyNode)
 
-        # Re-check the roles and placement right before the stop: the
+        # Wait for the Node first: the readiness wait can take up to a
+        # minute, during which the MDS roles can change. The roles and
+        # placement are then re-checked right before the stop: the
         # `Discover()` values are a discovery-time snapshot, and stopping the
         # kubelet of the active MDS Node would test the wrong scenario.
+        assert stbyNode.WaitReady(timeout='1m'), (
+            f'Prerequisites not met: Node `{stbyNode.name}` is not Ready.'
+        )
         states = fxtODF.storage.ceph.GetMDSstates(mds.fsName)
         (_, nodeName) = standby.Pod()
         assert (
@@ -309,9 +355,6 @@ class TestMDS():
             f'Prerequisites not met: MDS `{standby.name}` is not the '
             f'standby-replay MDS on Node `{stbyNode.name}` anymore (states: '
             f'{states}, Node: `{nodeName}`).'
-        )
-        assert stbyNode.WaitReady(timeout='1m'), (
-            f'Prerequisites not met: Node `{stbyNode.name}` is not Ready.'
         )
 
         # Trigger. The kubelet comes back by its timer only (at `upAt`). The
@@ -328,7 +371,9 @@ class TestMDS():
             # test already failed, so that they never hide the test result.
             if (clnFail := _RecoverKubeletStop(fxtODF, mds, upAt)):
                 clnErr = 'Kubelet stop recovery failed: ' + '; '.join(clnFail)
-                if (sys.exc_info()[1] is None): findings.append(clnErr)
-                else: logs.error('%s; preserving primary exception.', clnErr)
+                if (sys.exc_info()[1] is None):
+                    findings.append(clnErr)
+                else:
+                    logs.error('%s; preserving primary exception.', clnErr)
 
         assert not findings, '; '.join(findings)
